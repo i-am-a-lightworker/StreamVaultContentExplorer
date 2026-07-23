@@ -1,0 +1,15 @@
+{
+  "as_of": "2026-07-23",
+  "active_records": 9992,
+  "future_dated_records": 8,
+  "movies": 5013,
+  "tv_shows": 4979,
+  "current_quarter_additions": 161,
+  "international_current_quarter": 103,
+  "international_percentage": 64.0,
+  "documentaries_current_quarter": 9,
+  "documentary_share_current_quarter": 5.6,
+  "documentaries_previous_quarter": 60,
+  "documentary_share_previous_quarter": 8.4,
+  "countries_without_additions_last_90_days": []
+}
