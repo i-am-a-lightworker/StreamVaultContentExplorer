@@ -57,8 +57,12 @@ SCHEMA = {
 @st.cache_resource
 def get_connection() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
+    # DuckDB cannot prepare CREATE VIEW statements, so its CSV path must be
+    # part of the DDL text. Escape it for SQL while keeping parameters for
+    # regular data queries below.
+    catalog_path_sql = str(CATALOG_PATH).replace("'", "''")
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW catalog AS
         SELECT
             "Content ID" AS content_id,
@@ -87,9 +91,8 @@ def get_connection() -> duckdb.DuckDBPyConnection:
             "Featured Collection" AS featured_collection,
             TRY_CAST("Date Added" AS DATE) AS date_added,
             Description AS description
-        FROM read_csv_auto(?, header=true, all_varchar=true)
-        """,
-        [str(CATALOG_PATH)],
+        FROM read_csv_auto('{catalog_path_sql}', header=true, all_varchar=true)
+        """
     )
     return con
 
@@ -285,9 +288,34 @@ def format_result(df: pd.DataFrame):
     formats = {}
     for col in display.columns:
         name = str(col).lower()
+        needs_number_format = (
+            "completion" in name
+            or name.endswith("share")
+            or "percentage" in name
+            or name == "percent"
+            or "cost" in name
+            or "revenue" in name
+            or "hours" in name
+            or "count" in name
+            or "titles" in name
+            or "episodes" in name
+            or "score" in name
+            or "average" in name
+            or "avg" in name
+        )
+        if not needs_number_format:
+            continue
+        numeric = pd.to_numeric(display[col], errors="coerce")
+        non_null = display[col].notna()
+        is_numeric = not non_null.any() or numeric[non_null].notna().all()
+        # Query results can contain text columns whose names happen to include
+        # terms such as "score", "cost", or "count". Do not give those
+        # values a numeric format code.
+        if not is_numeric:
+            continue
+        display[col] = numeric
         if "completion" in name or name.endswith("share") or "percentage" in name or name == "percent":
             # Query results may be 0-1 ratios or 0-100 percentages. Normalize only when appropriate.
-            numeric = pd.to_numeric(display[col], errors="coerce")
             if numeric.notna().any() and numeric.abs().max() <= 1.0:
                 formats[col] = "{:.1%}"
             else:
@@ -316,10 +344,20 @@ st.markdown('<div class="sv-sub">Interactive intelligence across all 26 content 
 
 with st.sidebar:
     st.header("Analysis settings")
-    max_date = scalar("SELECT MAX(date_added) FROM catalog")
-    min_date = scalar("SELECT MIN(date_added) FROM catalog")
+    max_date_value = scalar("SELECT MAX(date_added) FROM catalog")
+    min_date_value = scalar("SELECT MIN(date_added) FROM catalog")
+    # DuckDB returns DATE aggregates through Pandas as Timestamps; convert
+    # them to Python dates before comparing them with TODAY or passing them
+    # to Streamlit's date-only widget.
+    max_date = pd.Timestamp(max_date_value).date() if pd.notna(max_date_value) else None
+    min_date = pd.Timestamp(min_date_value).date() if pd.notna(min_date_value) else None
     default_as_of = min(TODAY, max_date) if max_date else TODAY
-    as_of = st.date_input("Report as of", value=default_as_of, min_value=min_date, max_value=max(TODAY, max_date))
+    as_of = st.date_input(
+        "Report as of",
+        value=default_as_of,
+        min_value=min_date or TODAY,
+        max_value=max(TODAY, max_date) if max_date else TODAY,
+    )
     st.caption("Records dated after the selected date are excluded unless requested.")
     st.divider()
     st.markdown("**AI question answering**")
