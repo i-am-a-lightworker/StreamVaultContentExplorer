@@ -1,80 +1,64 @@
-# StreamVault Dashboard
+# StreamVault — Local Interactive Catalog Intelligence
 
-StreamVault is an interactive Streamlit content-intelligence application for a 26-field streaming catalog. It combines DuckDB calculations with an optional OpenAI question planner and analyst so users can ask detailed natural-language questions and receive grounded answers with supporting records.
+StreamVault is a Streamlit dashboard for exploring a 26-field streaming-content catalog. The question engine runs entirely on your computer with DuckDB and deterministic natural-language rules. It requires **no OpenAI API key, no API credits, and no paid model calls**.
 
-## New interactive question-answering capability
+## What users can ask
 
-The **Ask StreamVault** tab now supports questions across all 26 catalog fields, including:
+The local engine supports:
 
-- Titles, content type, country, language, release year, rating, and genre
-- Runtime, seasons, episodes, studio, and production company
-- Acquisition type and license expiration
-- Audience score, critic score, viewing hours, completion rate, and cost
-- Region availability, keywords, awards, featured collections, date added, and description
+- Counts: “How many Spanish-language dramas are in the catalog?”
+- Rankings: “Which 10 titles have the highest viewing hours?”
+- Comparisons: “Compare movies and TV shows by average cost and audience score.”
+- Grouped analysis: “Show average completion rate by genre.”
+- License reviews: “Which licenses expire in the next 90 days?”
+- Value analysis: “Which genres have the highest audience score per dollar?”
+- Theme and description searches: “Find titles about friendship or coming of age.”
+- Filters using catalog values such as country, language, genre, rating, studio, type, year, and score threshold.
 
-The workflow is:
+Every answer is calculated against the local CSV file. The app displays the supporting records and the read-only SQL used for the result.
 
-1. The AI interprets the question.
-2. It creates one read-only DuckDB `SELECT` query.
-3. StreamVault validates the query and blocks write/admin operations.
-4. DuckDB calculates the answer from the catalog.
-5. The AI explains only the verified results.
-6. The user can inspect the SQL and download the supporting data.
-
-Without an API key, the app still provides a local search across all text fields. Full calculations, comparisons, rankings, and narrative responses require an OpenAI API key.
-
-## Run locally
+## Install
 
 ```powershell
-cd C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard
+python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
+
+## Run
+
+```powershell
 streamlit run app.py
 ```
 
-## Configure the OpenAI API key locally
+Open `http://localhost:8501` if the browser does not open automatically.
 
-Create this folder and file inside the project:
+## No API configuration is needed
 
-```text
-.streamlit\secrets.toml
-```
+Do not create a `.streamlit/secrets.toml` file for this version. The `openai` package is not included in `requirements.txt`, and the application does not send catalog data or questions to an external AI service.
 
-Add:
+## How the local question engine works
 
-```toml
-OPENAI_API_KEY = "your-api-key-here"
-OPENAI_MODEL = "gpt-4.1-mini"
-```
+1. Detects the requested operation: count, ranking, comparison, average, total, license review, efficiency analysis, or descriptive search.
+2. Detects metrics such as viewing hours, cost, audience score, critic score, completion rate, runtime, seasons, and episodes.
+3. Detects grouping fields and filters from the 26 catalog columns.
+4. Builds a read-only DuckDB query.
+5. Executes the query locally.
+6. Produces a concise explanation, identifies common patterns when supported, and displays the exact result table.
 
-Never commit `secrets.toml`. The included `.gitignore` excludes it.
+## Important limitation
 
-## Configure Streamlit Community Cloud
+A deterministic local engine is highly reliable for supported analytical phrasing, but it does not have the unlimited language flexibility of a large language model. When a question is too broad, StreamVault automatically falls back to ranked keyword search across the catalog’s text fields. Rewording with a metric, category, filter, comparison, or ranking usually produces the strongest result.
 
-In the deployed app, open **App settings → Secrets** and add:
+## Multi-genre questions
 
-```toml
-OPENAI_API_KEY = "your-api-key-here"
-OPENAI_MODEL = "gpt-4.1-mini"
-```
+The local question engine recognizes every catalog genre named in a question instead of applying only the first genre. It can combine, count, rank, or compare selected genre groups without an API key.
 
-Then save and reboot the app.
+Examples:
 
-## Safety and accuracy controls
+- `Show the top 20 titles across Action, Comedy, and Drama.`
+- `Compare average audience scores for Horror, Thriller, and Sci-Fi.`
+- `How many titles are in Romance, Family, and Fantasy?`
+- `Which Action, Crime, or Thriller titles have the highest viewing hours?`
 
-- Only one read-only `SELECT`/`WITH` statement is allowed.
-- Data-changing and administrative SQL commands are blocked.
-- Questions default to records on or before the selected report date.
-- Detail outputs are capped to protect performance.
-- Answers are generated from query results, not from model memory.
-- Users can expand **How StreamVault analyzed this question** to inspect the interpretation and SQL.
-
-## Verified baseline metrics as of July 23, 2026
-
-- Active catalog records: 9,992
-- Movies: 5,013 (50.2%)
-- TV shows: 4,979 (49.8%)
-- International additions this quarter: 103 of 161 (64.0%)
-- Documentary share this quarter: 9 of 161 (5.6%)
-- Documentary share previous quarter: 60 of 717 (8.4%)
-- Countries with no additions in the previous 90 days: none
+The current catalog contains one **primary genre** per title. Multi-genre questions therefore combine titles from several requested genre categories into one analysis; they do not claim that an individual title has several stored genre labels.

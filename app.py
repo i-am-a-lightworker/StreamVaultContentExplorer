@@ -2,20 +2,13 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
-import json
-import os
 import re
-from typing import Any
+from difflib import get_close_matches
 
 import duckdb
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
 
 APP_DIR = Path(__file__).resolve().parent
 CATALOG_PATH = APP_DIR / "data" / "catalog.csv"
@@ -57,12 +50,8 @@ SCHEMA = {
 @st.cache_resource
 def get_connection() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
-    # DuckDB cannot prepare CREATE VIEW statements, so its CSV path must be
-    # part of the DDL text. Escape it for SQL while keeping parameters for
-    # regular data queries below.
-    catalog_path_sql = str(CATALOG_PATH).replace("'", "''")
     con.execute(
-        f"""
+        """
         CREATE OR REPLACE VIEW catalog AS
         SELECT
             "Content ID" AS content_id,
@@ -91,8 +80,9 @@ def get_connection() -> duckdb.DuckDBPyConnection:
             "Featured Collection" AS featured_collection,
             TRY_CAST("Date Added" AS DATE) AS date_added,
             Description AS description
-        FROM read_csv_auto('{catalog_path_sql}', header=true, all_varchar=true)
-        """
+        FROM read_csv_auto(?, header=true, all_varchar=true)
+        """,
+        [str(CATALOG_PATH)],
     )
     return con
 
@@ -132,190 +122,375 @@ def core_metrics(as_of: date) -> dict:
     return {"total": int(total or 0), "movies": int(movies or 0), "shows": int(shows or 0), "current": int(current or 0), "international": int(international or 0), "doc_current": int(doc_current or 0), "previous": int(previous or 0), "doc_previous": int(doc_previous or 0), "future": int(future or 0), "q_start": q_start, "q_end": q_end, "prev_q_start": prev_q_start}
 
 
-def get_secret(name: str, default: str = "") -> str:
-    try:
-        return str(st.secrets.get(name, os.getenv(name, default)))
-    except Exception:
-        return os.getenv(name, default)
+def clean_words(text: str) -> list[str]:
+    stop = {
+        "what", "which", "where", "when", "how", "many", "much", "are", "is", "was", "were",
+        "the", "a", "an", "of", "in", "on", "with", "and", "or", "to", "for", "show", "tell",
+        "me", "find", "content", "titles", "title", "catalog", "please", "give", "list", "that",
+        "have", "has", "from", "by", "based", "using", "all", "any", "our", "their", "its"
+    }
+    words = [w.lower() for w in re.findall(r"[A-Za-z0-9'-]+", text)]
+    return list(dict.fromkeys(w for w in words if len(w) > 2 and w not in stop))
 
 
-def schema_text() -> str:
-    return "\n".join(f"- {name}: {description}" for name, description in SCHEMA.items())
+def detect_limit(question: str, default: int = 20) -> int:
+    q = question.lower()
+    match = re.search(r"\b(?:top|first|highest|lowest|best|worst)\s+(\d{1,3})\b", q)
+    if not match:
+        match = re.search(r"\b(\d{1,3})\s+(?:titles|records|movies|shows|items)\b", q)
+    return max(1, min(int(match.group(1)), 100)) if match else default
 
 
-def extract_json(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("The AI did not return a valid query plan.")
-    return json.loads(cleaned[start:end + 1])
+METRIC_MAP = {
+    "viewing_hours": ["viewing hours", "watch hours", "watched", "viewership", "views"],
+    "cost_usd": ["cost", "costs", "spend", "spent", "budget", "dollar"],
+    "audience_score": ["audience score", "audience rating", "user score"],
+    "critic_score": ["critic score", "critic rating", "critics"],
+    "completion_rate": ["completion rate", "completion", "finished"],
+    "runtime_min": ["runtime", "length", "minutes", "duration"],
+    "seasons": ["seasons", "season"],
+    "episodes": ["episodes", "episode"],
+    "release_year": ["release year", "year released"],
+}
+
+DIMENSION_MAP = {
+    "content_type": ["movie versus tv", "movies versus tv", "movie vs tv", "movies vs tv", "content type", "type"],
+    "genre": ["genre", "genres"],
+    "country": ["country", "countries"],
+    "original_language": ["language", "languages"],
+    "studio": ["studio", "studios"],
+    "production_company": ["production company", "production companies", "producer"],
+    "rating": ["rating", "ratings", "maturity"],
+    "acquisition_type": ["acquisition type", "acquisition"],
+    "region_availability": ["region", "regions", "availability"],
+    "featured_collection": ["collection", "collections"],
+    "release_year": ["release year", "year"],
+}
+
+LABELS = {
+    "content_type": "Type", "genre": "Genre", "country": "Country", "original_language": "Language",
+    "studio": "Studio", "production_company": "Production Company", "rating": "Rating",
+    "acquisition_type": "Acquisition Type", "region_availability": "Region Availability",
+    "featured_collection": "Featured Collection", "release_year": "Release Year",
+    "viewing_hours": "Viewing Hours", "cost_usd": "Cost (USD)", "audience_score": "Audience Score",
+    "critic_score": "Critic Score", "completion_rate": "Completion Rate", "runtime_min": "Runtime (min)",
+    "seasons": "Seasons", "episodes": "Episodes"
+}
 
 
-def validate_sql(sql: str) -> str:
-    candidate = sql.strip().rstrip(";").strip()
-    compact = re.sub(r"\s+", " ", candidate).lower()
-    if not (compact.startswith("select ") or compact.startswith("with ")):
-        raise ValueError("Only read-only SELECT questions are allowed.")
-    if ";" in candidate:
-        raise ValueError("Only one SQL statement is allowed.")
-    forbidden = r"\b(insert|update|delete|drop|alter|create|replace|copy|attach|detach|install|load|pragma|call|export|import|truncate)\b"
-    if re.search(forbidden, compact, flags=re.I):
-        raise ValueError("The generated query contained a prohibited operation.")
-    if not re.search(r"\bcatalog\b", compact):
-        raise ValueError("The query must use the catalog view.")
-    # Cap detail outputs while preserving aggregate/grouped queries.
-    if not re.search(r"\blimit\s+\d+\b", compact) and not re.search(r"\b(count|sum|avg|min|max|median|quantile|stddev|variance)\s*\(", compact):
-        candidate += f" LIMIT {MAX_RESULT_ROWS}"
-    return candidate
+def detect_metrics(question: str) -> list[str]:
+    q = question.lower()
+    found = [column for column, phrases in METRIC_MAP.items() if any(phrase in q for phrase in phrases)]
+    if "score" in q and not any(x in found for x in ("audience_score", "critic_score")):
+        found.extend(["audience_score", "critic_score"])
+    return list(dict.fromkeys(found))
 
 
-def build_query_plan(question: str, as_of: date, api_key: str, model: str) -> dict[str, Any]:
-    if OpenAI is None:
-        raise RuntimeError("The OpenAI package is not installed. Run: pip install -r requirements.txt")
-    client = OpenAI(api_key=api_key)
-    instructions = f"""
-You are the query planner for StreamVault, a streaming catalog analytics application.
-Translate the user's question into ONE safe DuckDB SELECT query using only the view named catalog.
-The report date is {as_of.isoformat()}. Unless the user explicitly asks about future additions, exclude rows where date_added > DATE '{as_of.isoformat()}'.
-Use case-insensitive matching with lower(...) and LIKE for user-supplied text concepts.
-For questions about themes, plots, descriptions, or keywords, search description and keywords with LIKE.
-Completion rate is stored as 0-100, not 0-1.
-Never invent columns. Never modify data. Never use external tables, files, functions that read files, or system metadata.
-For title-list questions, include useful identifying and supporting columns and LIMIT 100.
-For rankings, sort appropriately and LIMIT 20 unless the user requests another number.
-For broad questions, create an aggregate that directly answers the question.
-
-Available columns:
-{schema_text()}
-
-Return JSON only in this exact structure:
-{{
-  "sql": "SELECT ...",
-  "interpretation": "one sentence explaining how you interpreted the question",
-  "answer_type": "aggregate|comparison|ranking|records|semantic_search",
-  "title": "short result heading"
-}}
-"""
-    response = client.responses.create(
-        model=model,
-        input=[
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": question},
-        ],
-    )
-    plan = extract_json(response.output_text)
-    plan["sql"] = validate_sql(str(plan.get("sql", "")))
-    return plan
+def detect_dimension(question: str) -> str | None:
+    q = question.lower()
+    for column, phrases in DIMENSION_MAP.items():
+        if any(phrase in q for phrase in phrases):
+            return column
+    return None
 
 
-def dataframe_for_prompt(df: pd.DataFrame, max_rows: int = 60) -> str:
-    safe = df.head(max_rows).copy()
-    for col in safe.columns:
-        if pd.api.types.is_datetime64_any_dtype(safe[col]):
-            safe[col] = safe[col].astype(str)
-    return safe.to_json(orient="records", date_format="iso", default_handler=str)
+def known_values(column: str, as_of: date) -> list[str]:
+    df = query(f"SELECT DISTINCT {column} AS value FROM catalog WHERE date_added <= ? AND {column} IS NOT NULL ORDER BY value", [as_of])
+    return [str(v) for v in df["value"].tolist() if str(v).strip()]
 
 
-def summarize_answer(question: str, as_of: date, plan: dict[str, Any], result: pd.DataFrame, api_key: str, model: str) -> str:
-    client = OpenAI(api_key=api_key)
-    result_json = dataframe_for_prompt(result)
-    instructions = f"""
-You are StreamVault's senior content intelligence analyst. Answer the user's question using ONLY the verified query results supplied below.
-Write a comprehensive but readable response with:
-1. A direct answer in the first sentence.
-2. Key evidence with exact values.
-3. Important comparisons, rankings, or patterns when supported.
-4. A brief business interpretation or implication.
-5. A transparent note when the result is empty, capped, incomplete, or cannot prove causation.
-Do not invent facts, totals, percentages, explanations, or titles that are absent from the data.
-Format numbers clearly. Format cost as USD and completion rate as a percentage when those fields appear.
-Report date: {as_of.isoformat()}.
-Interpretation used: {plan.get('interpretation', '')}
-Number of returned rows: {len(result)}.
-The application caps large detail result sets at {MAX_RESULT_ROWS} rows.
-"""
-    response = client.responses.create(
-        model=model,
-        input=[
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": f"Question: {question}\nVerified result rows: {result_json}"},
-        ],
-    )
-    return response.output_text.strip()
+def selected_genres(question: str, as_of: date) -> list[str]:
+    """Return every catalog genre explicitly named in the question."""
+    q = question.lower()
+    return [
+        value for value in known_values("genre", as_of)
+        if len(value) >= 3 and re.search(rf"\b{re.escape(value.lower())}\b", q)
+    ]
 
 
-def local_catalog_search(question: str, as_of: date) -> tuple[str, pd.DataFrame]:
-    """Useful no-key fallback: searches every text field for meaningful words."""
-    stop = {"what", "which", "where", "when", "how", "many", "much", "are", "is", "the", "a", "an", "of", "in", "on", "with", "and", "or", "to", "for", "show", "tell", "me", "find", "content", "titles", "title", "catalog"}
-    words = [w.lower() for w in re.findall(r"[A-Za-z0-9'-]+", question) if len(w) > 2 and w.lower() not in stop]
-    words = list(dict.fromkeys(words))[:8]
+def value_filter(question: str, as_of: date) -> tuple[list[str], list[Any], list[str]]:
+    q = question.lower()
+    conditions = ["date_added <= ?"]
+    params: list[Any] = [as_of]
+    notes: list[str] = []
+
+    if "movie" in q and "tv" not in q and "show" not in q:
+        conditions.append("content_type = 'Movie'")
+        notes.append("movies")
+    elif ("tv show" in q or "tv shows" in q or "series" in q) and "movie" not in q:
+        conditions.append("content_type = 'TV Show'")
+        notes.append("TV shows")
+
+    # A question may name several genres, such as "Action, Comedy and Drama".
+    # Use one IN filter so all requested genre categories are included.
+    genre_values = known_values("genre", as_of)
+    genre_matches = [v for v in genre_values if len(v) >= 3 and re.search(rf"\b{re.escape(v.lower())}\b", q)]
+    if genre_matches:
+        placeholders = ", ".join("?" for _ in genre_matches)
+        conditions.append(f"lower(genre) IN ({placeholders})")
+        params.extend(v.lower() for v in genre_matches)
+        if len(genre_matches) == 1:
+            notes.append(f"Genre = {genre_matches[0]}")
+        else:
+            notes.append(f"Genres = {', '.join(genre_matches)}")
+
+    for column in ["country", "original_language", "rating", "studio", "acquisition_type", "featured_collection"]:
+        values = known_values(column, as_of)
+        matches = [v for v in values if len(v) >= 3 and v.lower() in q]
+        if matches:
+            conditions.append(f"lower({column}) = ?")
+            params.append(matches[0].lower())
+            notes.append(f"{LABELS[column]} = {matches[0]}")
+
+    year_match = re.search(r"\b(19|20)\d{2}\b", q)
+    if year_match:
+        year = int(year_match.group(0))
+        if any(x in q for x in ["released", "release", "from", "in "]):
+            conditions.append("release_year = ?")
+            params.append(year)
+            notes.append(f"release year {year}")
+
+    score_match = re.search(r"(?:audience|critic)?\s*score\s*(?:above|over|greater than|at least)\s*(\d+(?:\.\d+)?)", q)
+    if score_match:
+        metric = "critic_score" if "critic" in q else "audience_score"
+        conditions.append(f"{metric} >= ?")
+        params.append(float(score_match.group(1)))
+        notes.append(f"{LABELS[metric]} at least {score_match.group(1)}")
+
+    if "next 90 days" in q or "within 90 days" in q:
+        conditions.append("license_expiration BETWEEN ? AND ?")
+        params.extend([as_of, as_of + timedelta(days=90)])
+        notes.append("license expiration within 90 days")
+    elif "next 30 days" in q or "within 30 days" in q:
+        conditions.append("license_expiration BETWEEN ? AND ?")
+        params.extend([as_of, as_of + timedelta(days=30)])
+        notes.append("license expiration within 30 days")
+    elif "expired" in q:
+        conditions.append("license_expiration < ?")
+        params.append(as_of)
+        notes.append("expired licenses")
+
+    return conditions, params, notes
+
+
+def make_answer(title: str, result: pd.DataFrame, notes: list[str], metric: str | None = None) -> str:
+    filter_text = f" Filters applied: {', '.join(notes)}." if notes else ""
+    if result.empty:
+        return f"**{title}:** No matching catalog records were found.{filter_text}"
+
+    if len(result) == 1 and result.shape[1] <= 5:
+        pieces = []
+        for col, value in result.iloc[0].items():
+            if pd.isna(value):
+                continue
+            if "cost" in col.lower():
+                pieces.append(f"**{col}:** ${float(value):,.2f}")
+            elif "completion" in col.lower():
+                pieces.append(f"**{col}:** {float(value):.1f}%")
+            elif isinstance(value, (int, float)):
+                pieces.append(f"**{col}:** {value:,.1f}" if isinstance(value, float) else f"**{col}:** {value:,}")
+            else:
+                pieces.append(f"**{col}:** {value}")
+        return f"**{title}.** " + " · ".join(pieces) + filter_text
+
+    lead = f"**{title}.** StreamVault found **{len(result):,} result rows**"
+    if metric and metric in result.columns:
+        top = result.iloc[0]
+        value = top[metric]
+        if "Cost" in metric:
+            shown = f"${float(value):,.2f}"
+        elif "Completion" in metric:
+            shown = f"{float(value):.1f}%"
+        else:
+            shown = f"{float(value):,.1f}"
+        lead += f". The leading result is **{top.iloc[0]}** with **{shown}**"
+    patterns = []
+    for col in ["Type", "Genre", "Country", "Language", "Studio", "Rating"]:
+        if col in result.columns and result[col].notna().any():
+            counts = result[col].astype(str).value_counts()
+            if not counts.empty and counts.iloc[0] >= max(2, len(result) * 0.3):
+                patterns.append(f"{counts.index[0]} is the most common {col.lower()} ({counts.iloc[0]} of {len(result)})")
+    pattern_text = f" A notable pattern is that {'; '.join(patterns[:3])}." if patterns else ""
+    return lead + "." + filter_text + pattern_text + " The supporting table contains the exact records and values used."
+
+
+def semantic_search(question: str, as_of: date, conditions: list[str], params: list[Any], limit: int) -> tuple[str, pd.DataFrame, dict]:
+    words = clean_words(question)[:10]
     if not words:
-        return "Enter a more specific question or add an OpenAI API key for full natural-language analytics.", pd.DataFrame()
+        return "Please enter a more specific catalog question.", pd.DataFrame(), {"interpretation": "No searchable terms detected", "sql": ""}
     searchable = "lower(concat_ws(' ', title, content_type, country, original_language, rating, genre, studio, production_company, acquisition_type, region_availability, keywords, awards, featured_collection, description))"
-    clauses, params = ["date_added <= ?"], [as_of]
+    score_parts = []
+    local_params = list(params)
     for word in words:
-        clauses.append(f"{searchable} LIKE ?")
-        params.append(f"%{word}%")
-    df = query(f"""
-        SELECT title AS "Title", content_type AS "Type", country AS "Country",
-               original_language AS "Language", release_year AS "Release Year",
-               rating AS "Rating", genre AS "Genre", studio AS "Studio",
-               audience_score AS "Audience Score", critic_score AS "Critic Score",
-               viewing_hours AS "Viewing Hours", completion_rate / 100.0 AS "Completion Rate",
-               cost_usd AS "Cost (USD)", region_availability AS "Regions",
-               date_added AS "Date Added", description AS "Description"
-        FROM catalog WHERE {' AND '.join(clauses)}
-        ORDER BY viewing_hours DESC NULLS LAST, audience_score DESC NULLS LAST
-        LIMIT 100
-    """, params)
-    return f"Local search found **{len(df):,} matching records** using these terms: **{', '.join(words)}**. Add an OpenAI API key to enable calculations, comparisons, rankings, and detailed narrative answers to unrestricted questions.", df
+        score_parts.append(f"CASE WHEN {searchable} LIKE ? THEN 1 ELSE 0 END")
+        local_params.append(f"%{word}%")
+    score_expr = " + ".join(score_parts)
+    sql = f"""
+        SELECT title AS "Title", content_type AS "Type", country AS "Country", original_language AS "Language",
+               release_year AS "Release Year", rating AS "Rating", genre AS "Genre", studio AS "Studio",
+               audience_score AS "Audience Score", critic_score AS "Critic Score", viewing_hours AS "Viewing Hours",
+               completion_rate AS "Completion Rate", cost_usd AS "Cost (USD)", region_availability AS "Regions",
+               keywords AS "Keywords", description AS "Description", ({score_expr}) AS "Match Score"
+        FROM catalog
+        WHERE {' AND '.join(conditions)} AND ({score_expr}) > 0
+        ORDER BY "Match Score" DESC, viewing_hours DESC NULLS LAST, audience_score DESC NULLS LAST
+        LIMIT {limit}
+    """
+    # Score expression appears twice, so repeat word params for the WHERE expression.
+    exec_params = local_params + [f"%{word}%" for word in words]
+    result = query(sql, exec_params)
+    answer = f"**Local semantic search found {len(result):,} matching titles** using the concepts: **{', '.join(words)}**. Results are ranked by how many concepts appear across titles, descriptions, keywords, genres, studios, awards, regions, and other text fields."
+    return answer, result, {"interpretation": "Local keyword-based semantic search across catalog text fields", "sql": sql}
 
 
-def ask_streamvault(question: str, as_of: date, api_key: str, model: str):
-    if not api_key:
-        text, result = local_catalog_search(question, as_of)
-        return text, result, None
-    plan = build_query_plan(question, as_of, api_key, model)
-    result = query(plan["sql"])
-    answer = summarize_answer(question, as_of, plan, result, api_key, model)
-    return answer, result, plan
+def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame, dict]:
+    q = question.lower().strip()
+    limit = detect_limit(question)
+    conditions, params, notes = value_filter(question, as_of)
+    where = " AND ".join(conditions)
+    metrics = detect_metrics(question)
+    dimension = detect_dimension(question)
+    genres_in_question = selected_genres(question, as_of)
+    # Naming two or more genres implies a genre comparison/grouping even when
+    # the user does not explicitly type the word "genre".
+    if len(genres_in_question) >= 2 and dimension is None:
+        dimension = "genre"
 
+    # License expiration questions.
+    if "license" in q and any(x in q for x in ["expire", "expiration", "renew", "expired"]):
+        sql = f"""
+            SELECT title AS "Title", content_type AS "Type", genre AS "Genre", studio AS "Studio",
+                   license_expiration AS "License Expiration", viewing_hours AS "Viewing Hours",
+                   audience_score AS "Audience Score", cost_usd AS "Cost (USD)"
+            FROM catalog WHERE {where}
+            ORDER BY license_expiration ASC NULLS LAST, viewing_hours DESC NULLS LAST LIMIT {limit}
+        """
+        result = query(sql, params)
+        answer = make_answer("License review", result, notes)
+        return answer, result, {"interpretation": "License-expiration review using the selected report date", "sql": sql}
+
+    # Counts.
+    if any(phrase in q for phrase in ["how many", "number of", "count of", "total titles"]):
+        if dimension:
+            sql = f"SELECT {dimension} AS \"{LABELS[dimension]}\", COUNT(*) AS \"Title Count\" FROM catalog WHERE {where} GROUP BY {dimension} ORDER BY \"Title Count\" DESC LIMIT {limit}"
+            result = query(sql, params)
+            title = f"Title count by {LABELS[dimension].lower()}"
+        else:
+            sql = f"SELECT COUNT(*) AS \"Title Count\" FROM catalog WHERE {where}"
+            result = query(sql, params)
+            title = "Catalog count"
+        return make_answer(title, result, notes), result, {"interpretation": title, "sql": sql}
+
+    # Value/efficiency analysis such as score or viewing per dollar.
+    if dimension and any(x in q for x in ["per dollar", "relative to cost", "value for money", "efficiency", "roi"]):
+        numerator = "viewing_hours" if any(x in q for x in ["viewing", "watch", "hours"]) else "audience_score"
+        sql = f"""
+            SELECT {dimension} AS "{LABELS[dimension]}", COUNT(*) AS "Title Count",
+                   AVG({numerator}) AS "Average {LABELS[numerator]}",
+                   AVG(cost_usd) AS "Average Cost (USD)",
+                   SUM({numerator}) / NULLIF(SUM(cost_usd), 0) AS "{LABELS[numerator]} per Dollar"
+            FROM catalog WHERE {where} AND cost_usd > 0 AND {numerator} IS NOT NULL
+            GROUP BY {dimension}
+            ORDER BY "{LABELS[numerator]} per Dollar" DESC NULLS LAST LIMIT {limit}
+        """
+        result = query(sql, params)
+        title = f"{LABELS[numerator]} per dollar by {LABELS[dimension].lower()}"
+        return make_answer(title, result, notes), result, {"interpretation": title, "sql": sql}
+
+    # Comparisons and averages by a dimension.
+    wants_average = any(x in q for x in ["average", "avg", "mean"])
+    wants_compare = any(x in q for x in ["compare", "versus", " vs ", "difference", "by "])
+    if dimension and (wants_compare or wants_average or len(metrics) > 1):
+        use_metrics = metrics or ["audience_score", "critic_score", "viewing_hours", "completion_rate", "cost_usd"]
+        agg = [f"COUNT(*) AS \"Title Count\""]
+        for m in use_metrics:
+            agg.append(f"AVG({m}) AS \"Average {LABELS[m]}\"")
+        sql = f"SELECT {dimension} AS \"{LABELS[dimension]}\", {', '.join(agg)} FROM catalog WHERE {where} GROUP BY {dimension} ORDER BY \"Title Count\" DESC LIMIT {limit}"
+        result = query(sql, params)
+        title = f"Comparison by {LABELS[dimension].lower()}"
+        return make_answer(title, result, notes), result, {"interpretation": title, "sql": sql}
+
+    # Ranking by a metric.
+    ranking_words = ["highest", "lowest", "top", "best", "worst", "rank", "most", "least"]
+    if metrics and any(x in q for x in ranking_words):
+        metric = metrics[0]
+        ascending = any(x in q for x in ["lowest", "least", "worst", "cheapest"])
+        direction = "ASC" if ascending else "DESC"
+        sql = f"""
+            SELECT title AS "Title", content_type AS "Type", genre AS "Genre", country AS "Country",
+                   original_language AS "Language", release_year AS "Release Year", studio AS "Studio",
+                   {metric} AS "{LABELS[metric]}", audience_score AS "Audience Score",
+                   critic_score AS "Critic Score", viewing_hours AS "Viewing Hours",
+                   completion_rate AS "Completion Rate", cost_usd AS "Cost (USD)"
+            FROM catalog WHERE {where} AND {metric} IS NOT NULL
+            ORDER BY {metric} {direction} NULLS LAST LIMIT {limit}
+        """
+        result = query(sql, params)
+        title = f"{'Lowest' if ascending else 'Highest'} {LABELS[metric].lower()}"
+        return make_answer(title, result, notes, LABELS[metric]), result, {"interpretation": title, "sql": sql}
+
+    # Single-metric summary.
+    if metrics and any(x in q for x in ["average", "avg", "mean", "total", "sum", "median", "minimum", "maximum"]):
+        metric = metrics[0]
+        if "median" in q:
+            func, label = "MEDIAN", "Median"
+        elif any(x in q for x in ["minimum", "lowest"]):
+            func, label = "MIN", "Minimum"
+        elif any(x in q for x in ["maximum", "highest"]):
+            func, label = "MAX", "Maximum"
+        elif any(x in q for x in ["total", "sum"]):
+            func, label = "SUM", "Total"
+        else:
+            func, label = "AVG", "Average"
+        sql = f"SELECT {func}({metric}) AS \"{label} {LABELS[metric]}\", COUNT(*) AS \"Records Used\" FROM catalog WHERE {where} AND {metric} IS NOT NULL"
+        result = query(sql, params)
+        title = f"{label} {LABELS[metric].lower()}"
+        return make_answer(title, result, notes), result, {"interpretation": title, "sql": sql}
+
+    # Explicit multi-genre title request. The source catalog stores one primary
+    # genre per title, so this returns titles across all requested genre groups.
+    multi_genre_language = any(phrase in q for phrase in [
+        "multiple genres", "multi genre", "multi-genre", "across genres",
+        "span across", "spanning", "cross genre", "cross-genre"
+    ])
+    if len(genres_in_question) >= 2 or (multi_genre_language and dimension == "genre"):
+        sql = f"""
+            SELECT title AS "Title", content_type AS "Type", genre AS "Primary Genre",
+                   country AS "Country", original_language AS "Language",
+                   release_year AS "Release Year", rating AS "Rating", studio AS "Studio",
+                   audience_score AS "Audience Score", critic_score AS "Critic Score",
+                   viewing_hours AS "Viewing Hours", completion_rate AS "Completion Rate",
+                   cost_usd AS "Cost (USD)", keywords AS "Keywords", description AS "Description"
+            FROM catalog WHERE {where}
+            ORDER BY genre, viewing_hours DESC NULLS LAST, audience_score DESC NULLS LAST
+            LIMIT {limit}
+        """
+        result = query(sql, params)
+        if genres_in_question:
+            scope = ", ".join(genres_in_question)
+            title = f"Titles across {scope}"
+            answer = make_answer(title, result, notes)
+            answer += " Each catalog title has one primary genre; this result combines the requested genre groups into one report."
+        else:
+            answer = make_answer("Titles across multiple genre groups", result, notes)
+            answer += " The catalog currently stores one primary genre per title rather than multiple genre tags for an individual title."
+        return answer, result, {"interpretation": "Multi-genre title search using all named genre categories", "sql": sql}
+
+    # Descriptive/theme search or broad fallback.
+    return semantic_search(question, as_of, conditions, params, limit)
+
+
+def ask_streamvault(question: str, as_of: date):
+    return local_question_engine(question, as_of)
 
 def format_result(df: pd.DataFrame):
     display = df.copy()
     formats = {}
     for col in display.columns:
         name = str(col).lower()
-        needs_number_format = (
-            "completion" in name
-            or name.endswith("share")
-            or "percentage" in name
-            or name == "percent"
-            or "cost" in name
-            or "revenue" in name
-            or "hours" in name
-            or "count" in name
-            or "titles" in name
-            or "episodes" in name
-            or "score" in name
-            or "average" in name
-            or "avg" in name
-        )
-        if not needs_number_format:
-            continue
-        numeric = pd.to_numeric(display[col], errors="coerce")
-        non_null = display[col].notna()
-        is_numeric = not non_null.any() or numeric[non_null].notna().all()
-        # Query results can contain text columns whose names happen to include
-        # terms such as "score", "cost", or "count". Do not give those
-        # values a numeric format code.
-        if not is_numeric:
-            continue
-        display[col] = numeric
         if "completion" in name or name.endswith("share") or "percentage" in name or name == "percent":
             # Query results may be 0-1 ratios or 0-100 percentages. Normalize only when appropriate.
+            numeric = pd.to_numeric(display[col], errors="coerce")
             if numeric.notna().any() and numeric.abs().max() <= 1.0:
                 formats[col] = "{:.1%}"
             else:
@@ -344,36 +519,20 @@ st.markdown('<div class="sv-sub">Interactive intelligence across all 26 content 
 
 with st.sidebar:
     st.header("Analysis settings")
-    max_date_value = scalar("SELECT MAX(date_added) FROM catalog")
-    min_date_value = scalar("SELECT MIN(date_added) FROM catalog")
-    # DuckDB returns DATE aggregates through Pandas as Timestamps; convert
-    # them to Python dates before comparing them with TODAY or passing them
-    # to Streamlit's date-only widget.
-    max_date = pd.Timestamp(max_date_value).date() if pd.notna(max_date_value) else None
-    min_date = pd.Timestamp(min_date_value).date() if pd.notna(min_date_value) else None
+    max_date = scalar("SELECT MAX(date_added) FROM catalog")
+    min_date = scalar("SELECT MIN(date_added) FROM catalog")
     default_as_of = min(TODAY, max_date) if max_date else TODAY
-    as_of = st.date_input(
-        "Report as of",
-        value=default_as_of,
-        min_value=min_date or TODAY,
-        max_value=max(TODAY, max_date) if max_date else TODAY,
-    )
+    as_of = st.date_input("Report as of", value=default_as_of, min_value=min_date, max_value=max(TODAY, max_date))
     st.caption("Records dated after the selected date are excluded unless requested.")
     st.divider()
-    st.markdown("**AI question answering**")
-    api_key = get_secret("OPENAI_API_KEY")
-    model = get_secret("OPENAI_MODEL", "gpt-4.1-mini")
-    if api_key:
-        st.success("AI analytics is connected")
-        st.caption(f"Model: {model}")
-    else:
-        st.warning("OpenAI API key not configured")
-        st.caption("The app can still search records locally, but advanced calculations and detailed AI answers require a key.")
+    st.markdown("**Local question engine**")
+    st.success("No API key required")
+    st.caption("Questions are interpreted locally and calculated with DuckDB. There are no model-credit charges.")
     st.divider()
     st.markdown("**Trusted definitions**")
     st.caption("International: country is not United States")
     st.caption("Recent: trailing 90 calendar days")
-    st.caption("All AI-generated SQL is read-only and validated")
+    st.caption("All generated SQL is read-only and runs locally")
 
 metrics = core_metrics(as_of)
 movie_share = pct(metrics["movies"], metrics["total"])
@@ -415,6 +574,8 @@ with tabs[1]:
         "Find highly rated Spanish-language dramas available in North America.",
         "Which licenses expire in the next 90 days, ranked by viewing hours?",
         "What genres give us the strongest audience score per dollar spent?",
+        "Show the top 20 titles across Action, Comedy, and Drama.",
+        "Compare audience scores for Horror, Thriller, and Sci-Fi titles.",
         "Show content about friendship or coming of age based on descriptions and keywords.",
     ]
     selected = None
@@ -441,7 +602,7 @@ with tabs[1]:
         with st.chat_message("assistant"):
             with st.spinner("Analyzing all relevant catalog fields..."):
                 try:
-                    answer, result, plan = ask_streamvault(question, as_of, api_key, model)
+                    answer, result, plan = ask_streamvault(question, as_of)
                     st.markdown(answer)
                     if plan:
                         with st.expander("How StreamVault analyzed this question"):
@@ -457,7 +618,7 @@ with tabs[1]:
                 except Exception as exc:
                     error_text = f"I could not complete that analysis: **{exc}**"
                     st.error(error_text)
-                    st.caption("Try rewording the question more specifically. Administrators can also inspect the generated SQL and API configuration.")
+                    st.caption("Try rewording the question with a metric, category, filter, ranking, comparison, or theme.")
                     st.session_state.messages.append({"role": "assistant", "content": error_text})
 
     if st.button("Clear conversation"):
@@ -468,7 +629,7 @@ with tabs[2]:
     st.subheader("Catalog data dictionary")
     dictionary = pd.DataFrame([{"Field": k, "Meaning": v} for k, v in SCHEMA.items()])
     st.dataframe(dictionary, use_container_width=True, hide_index=True)
-    st.caption("All 26 fields are available to the AI question planner and the catalog explorer.")
+    st.caption("All 26 fields are available to the local question engine and the catalog explorer.")
 
 with tabs[3]:
     monthly = query("SELECT date_trunc('month', date_added) AS month, COUNT(*) AS titles_added FROM catalog WHERE date_added <= ? GROUP BY month ORDER BY month", [as_of])
