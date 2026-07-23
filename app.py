@@ -50,8 +50,11 @@ SCHEMA = {
 @st.cache_resource
 def get_connection() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
+    # DuckDB does not allow prepared parameters in CREATE VIEW statements.
+    # Escape the local CSV path before embedding it in this static DDL.
+    catalog_path_sql = str(CATALOG_PATH).replace("'", "''")
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW catalog AS
         SELECT
             "Content ID" AS content_id,
@@ -80,9 +83,8 @@ def get_connection() -> duckdb.DuckDBPyConnection:
             "Featured Collection" AS featured_collection,
             TRY_CAST("Date Added" AS DATE) AS date_added,
             Description AS description
-        FROM read_csv_auto(?, header=true, all_varchar=true)
-        """,
-        [str(CATALOG_PATH)],
+        FROM read_csv_auto('{catalog_path_sql}', header=true, all_varchar=true)
+        """
     )
     return con
 
