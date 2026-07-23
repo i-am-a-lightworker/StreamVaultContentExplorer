@@ -1,6 +1,6 @@
 # StreamVault — Local Interactive Catalog Intelligence
 
-StreamVault is a Streamlit dashboard for exploring a 26-field streaming-content catalog. The question engine runs entirely on your computer with DuckDB and deterministic natural-language rules. It requires **no OpenAI API key, no API credits, and no paid model calls**.
+StreamVault is a browser-based dashboard for exploring a 26-field streaming-content catalog. When published on Streamlit Community Cloud, visitors only open the app's web link—there is nothing to download, install, or configure. The question engine runs on the hosted server with DuckDB and deterministic natural-language rules. It requires **no OpenAI API key, no API credits, and no paid model calls**.
 
 ## What users can ask
 
@@ -15,9 +15,25 @@ The local engine supports:
 - Theme and description searches: “Find titles about friendship or coming of age.”
 - Filters using catalog values such as country, language, genre, rating, studio, type, year, and score threshold.
 
-Every answer is calculated against the local CSV file. The app displays the supporting records and the read-only SQL used for the result.
+Every answer is calculated against the catalog CSV included with the app. The app displays the supporting records and the read-only SQL used for the result.
 
-## Install
+## Use the published app
+
+Once the publisher deploys StreamVault, share its `streamlit.app` URL. Visitors can open that link in any modern browser and start using the dashboard immediately. They do not need Python, Git, the repository, or any local files.
+
+## Publish to the browser with Streamlit Community Cloud
+
+The repository is ready to deploy as-is: `app.py` is the entrypoint, `requirements.txt` declares the server dependencies, and `data/catalog.csv` is bundled with the app.
+
+1. Push this repository to GitHub.
+2. Sign in at [Streamlit Community Cloud](https://share.streamlit.io/) with the GitHub account that owns the repository.
+3. Select **Create app**, choose the repository and the `main` branch, then set the entrypoint file to `app.py`.
+4. Optionally choose a memorable `streamlit.app` subdomain, then deploy.
+5. Share the resulting browser URL with users.
+
+Future pushes to the selected branch update the hosted app automatically. See Streamlit's [deployment guide](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy) for publisher account and visibility options.
+
+## Local development (optional)
 
 ```powershell
 python -m venv .venv
@@ -25,7 +41,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Run
+## Run locally
 
 ```powershell
 streamlit run app.py
