@@ -98,6 +98,14 @@ def scalar(sql: str, params: list | None = None):
     return df.iloc[0, 0] if not df.empty else None
 
 
+def to_python_date(value: object) -> date | None:
+    """Normalize database and pandas date scalars for Streamlit widgets."""
+    if value is None:
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    return None if pd.isna(parsed) else parsed.date()
+
+
 def period_bounds(as_of: date):
     q_month = ((as_of.month - 1) // 3) * 3 + 1
     q_start = date(as_of.year, q_month, 1)
@@ -490,9 +498,32 @@ def format_result(df: pd.DataFrame):
     formats = {}
     for col in display.columns:
         name = str(col).lower()
+        needs_number_format = (
+            "completion" in name
+            or name.endswith("share")
+            or "percentage" in name
+            or name == "percent"
+            or "cost" in name
+            or "revenue" in name
+            or "hours" in name
+            or "count" in name
+            or "titles" in name
+            or "episodes" in name
+            or "score" in name
+            or "average" in name
+            or "avg" in name
+        )
+        if not needs_number_format:
+            continue
+        numeric = pd.to_numeric(display[col], errors="coerce")
+        non_null = display[col].notna()
+        # A name like "Score" or "Cost" does not prove that a query result
+        # is numeric. Only format columns whose actual non-null values convert.
+        if non_null.any() and not numeric[non_null].notna().all():
+            continue
+        display[col] = numeric
         if "completion" in name or name.endswith("share") or "percentage" in name or name == "percent":
             # Query results may be 0-1 ratios or 0-100 percentages. Normalize only when appropriate.
-            numeric = pd.to_numeric(display[col], errors="coerce")
             if numeric.notna().any() and numeric.abs().max() <= 1.0:
                 formats[col] = "{:.1%}"
             else:
@@ -521,10 +552,15 @@ st.markdown('<div class="sv-sub">Interactive intelligence across all 26 content 
 
 with st.sidebar:
     st.header("Analysis settings")
-    max_date = scalar("SELECT MAX(date_added) FROM catalog")
-    min_date = scalar("SELECT MIN(date_added) FROM catalog")
+    max_date = to_python_date(scalar("SELECT MAX(date_added) FROM catalog"))
+    min_date = to_python_date(scalar("SELECT MIN(date_added) FROM catalog"))
     default_as_of = min(TODAY, max_date) if max_date else TODAY
-    as_of = st.date_input("Report as of", value=default_as_of, min_value=min_date, max_value=max(TODAY, max_date))
+    as_of = st.date_input(
+        "Report as of",
+        value=default_as_of,
+        min_value=min_date or TODAY,
+        max_value=max(TODAY, max_date) if max_date else TODAY,
+    )
     st.caption("Records dated after the selected date are excluded unless requested.")
     st.divider()
     st.markdown("**Local question engine**")
