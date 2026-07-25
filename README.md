@@ -49,9 +49,23 @@ streamlit run app.py
 
 Open `http://localhost:8501` if the browser does not open automatically.
 
-## No API configuration is needed
+## Complex natural-language analysis (recommended)
 
-Do not create a `.streamlit/secrets.toml` file for this version. The `openai` package is not included in `requirements.txt`, and the application does not send catalog data or questions to an external AI service.
+The built-in local rules remain available without any configuration, but they are intentionally limited to predictable question patterns. To answer highly complex questions involving multiple filters, calculations, comparisons, and any of the 26 catalog fields, configure the optional AI planner in `.streamlit/secrets.toml`:
+
+```toml
+OPENAI_API_KEY = "your-api-key"
+# Optional: choose the model your organization has approved.
+OPENAI_MODEL = "gpt-4.1-mini"
+```
+
+The planner receives the user question and the field definitions, then returns a single read-only DuckDB `SELECT` query. StreamVault validates that query and executes it locally against the bundled CSV; the catalog data itself is not sent to the model. If the planner is unavailable, the app transparently falls back to the local rule engine.
+
+For exact analyst-authored work, questions can also begin with `SQL:` followed by one safe read-only query against the `catalog` view. The query must include the selected `date_added` report-date constraint.
+
+## Local-only mode
+
+No extra package is required for local-only mode. The application does not contact an external service unless `OPENAI_API_KEY` is explicitly configured.
 
 ## How the local question engine works
 

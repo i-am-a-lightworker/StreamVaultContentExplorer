@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+import json
+import os
 import re
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from difflib import get_close_matches
 
 import duckdb
@@ -353,6 +357,104 @@ def semantic_search(question: str, as_of: date, conditions: list[str], params: l
     return answer, result, {"interpretation": "Local keyword-based semantic search across catalog text fields", "sql": sql}
 
 
+def openai_api_key() -> str | None:
+    """Read an optional API key without ever exposing it in the interface."""
+    try:
+        key = st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        key = None
+    return str(key or os.getenv("OPENAI_API_KEY") or "").strip() or None
+
+
+def is_safe_catalog_sql(sql: str, as_of: date) -> tuple[bool, str]:
+    """Allow one read-only DuckDB statement against the catalog view only."""
+    normalized = re.sub(r"\s+", " ", sql.strip()).lower()
+    forbidden = r"\b(insert|update|delete|drop|alter|create|copy|attach|detach|install|load|pragma|call|export|import)\b"
+    if not normalized.startswith(("select ", "with ")):
+        return False, "The plan did not produce a SELECT query."
+    if ";" in normalized or re.search(forbidden, normalized):
+        return False, "The plan included an unsupported SQL operation."
+    if not re.search(r"\bfrom\s+catalog\b|\bjoin\s+catalog\b", normalized):
+        return False, "The plan must query the catalog view."
+    if "date_added" not in normalized:
+        return False, "The plan did not apply the selected report date."
+    if as_of.isoformat() not in normalized:
+        return False, "The plan did not use the selected report date."
+    return True, ""
+
+
+def run_sql_question(sql: str, as_of: date, interpretation: str = "Advanced catalog analysis") -> tuple[str, pd.DataFrame, dict]:
+    safe, reason = is_safe_catalog_sql(sql, as_of)
+    if not safe:
+        raise ValueError(reason)
+    result = query(sql)
+    answer = make_answer(interpretation, result, [])
+    return answer, result, {"interpretation": interpretation, "sql": sql}
+
+
+def ai_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame, dict] | None:
+    """Use an optional model to plan complex analysis; all data execution stays local."""
+    api_key = openai_api_key()
+    if not api_key:
+        return None
+
+    model = "gpt-4.1-mini"
+    try:
+        model = str(st.secrets.get("OPENAI_MODEL") or os.getenv("OPENAI_MODEL") or model)
+    except Exception:
+        model = os.getenv("OPENAI_MODEL") or model
+
+    schema = "\n".join(f"- {name}: {meaning}" for name, meaning in SCHEMA.items())
+    instructions = f"""You are the planning layer for a streaming-catalog analyst.
+Turn the user's request into exactly one DuckDB SELECT query against the view named catalog.
+Return only JSON with keys sql and interpretation. Do not use markdown.
+
+The catalog has these fields:
+{schema}
+
+Rules:
+- Every query MUST include a predicate limiting records to date_added <= DATE '{as_of.isoformat()}'.
+- Use only the catalog view, listed fields, standard DuckDB SELECT/WITH syntax, and literal values.
+- Never use DDL, DML, file access, extensions, multiple statements, or a semicolon.
+- Answer the entire request: combine all stated filters, comparisons, rankings, groupings, date ranges, and calculations.
+- For title lists, include useful identifying fields and every metric relevant to the question.
+- Use NULLIF for divisions, explicit aliases, and LIMIT 500 or less for row-level outputs.
+- Do not invent fields or catalog values. If the request cannot be answered from the schema, return a SELECT that reports a clear limitation as an explanation column while still querying catalog and applying the report-date predicate.
+"""
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": instructions}]},
+            {"role": "user", "content": [{"type": "input_text", "text": question}]},
+        ],
+        "temperature": 0,
+    }
+    request = Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=45) as response:
+            response_body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise ValueError(f"The AI planner returned HTTP {exc.code}.") from exc
+    except URLError as exc:
+        raise ValueError("The AI planner could not be reached.") from exc
+
+    output_text = response_body.get("output_text", "").strip()
+    if not output_text:
+        raise ValueError("The AI planner returned no analysis.")
+    try:
+        plan = json.loads(output_text)
+        sql = str(plan["sql"]).strip()
+        interpretation = str(plan.get("interpretation") or "AI-planned catalog analysis").strip()
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("The AI planner returned an invalid analysis plan.") from exc
+    return run_sql_question(sql, as_of, interpretation)
+
+
 def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame, dict]:
     q = question.lower().strip()
     limit = detect_limit(question)
@@ -491,7 +593,23 @@ def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame
 
 
 def ask_streamvault(question: str, as_of: date):
-    return local_question_engine(question, as_of)
+    # An explicit SQL request is useful for analysts who need a precise,
+    # repeatable answer without sending the question to any external service.
+    if question.lstrip().lower().startswith("sql:"):
+        return run_sql_question(question.split(":", 1)[1].strip(), as_of, "Advanced SQL analysis")
+
+    # A configured planner handles compound, natural-language requests across
+    # every catalog field. The deterministic engine remains a private fallback.
+    if openai_api_key():
+        try:
+            return ai_question_engine(question, as_of)
+        except ValueError as exc:
+            answer, result, plan = local_question_engine(question, as_of)
+            plan["interpretation"] = f"AI planning was unavailable ({exc}) so StreamVault used the local rules. {plan['interpretation']}"
+            return answer, result, plan
+    answer, result, plan = local_question_engine(question, as_of)
+    plan["interpretation"] = "Local rules were used because AI planning is not configured. Add OPENAI_API_KEY to Streamlit secrets for complex natural-language analysis across all 26 fields. " + plan["interpretation"]
+    return answer, result, plan
 
 def format_result(df: pd.DataFrame):
     display = df.copy()
@@ -563,9 +681,13 @@ with st.sidebar:
     )
     st.caption("Records dated after the selected date are excluded unless requested.")
     st.divider()
-    st.markdown("**Local question engine**")
-    st.success("No API key required")
-    st.caption("Questions are interpreted locally and calculated with DuckDB. There are no model-credit charges.")
+    st.markdown("**Question engine**")
+    if openai_api_key():
+        st.success("AI planning enabled")
+        st.caption("Complex questions are converted to safe read-only SQL; catalog calculations stay local.")
+    else:
+        st.info("Local rules enabled")
+        st.caption("Add OPENAI_API_KEY to Streamlit secrets to enable complex natural-language analysis across all 26 fields.")
     st.divider()
     st.markdown("**Trusted definitions**")
     st.caption("International: country is not United States")
@@ -604,7 +726,8 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("Ask any question about the catalog")
-    st.write("Ask about titles, countries, languages, ratings, genres, runtime, seasons, studios, licenses, scores, viewing, costs, regions, keywords, awards, dates, descriptions—or combinations of them.")
+    st.write("Ask complex questions across titles, countries, languages, ratings, genres, runtime, seasons, studios, licenses, scores, viewing, costs, regions, keywords, awards, dates, and descriptions. With AI planning enabled, StreamVault combines every stated condition into a safe local SQL analysis.")
+    st.caption("For exact analyst-authored queries, start with `SQL:` followed by one read-only SELECT statement that includes the selected report date.")
 
     examples = [
         "Which 10 titles have the highest viewing hours and what do they have in common?",
