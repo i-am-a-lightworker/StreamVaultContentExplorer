@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import time
 from datetime import date, timedelta
 from pathlib import Path
 import json
@@ -839,6 +839,51 @@ def ask_streamvault(question: str, as_of: date):
             "sql": "",
         }
 
+
+def parse_batch_questions(text: str, maximum: int = 25) -> list[str]:
+    """Turn one-question-per-line input into a bounded batch of prompts."""
+    questions = []
+    for line in text.splitlines():
+        question = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if question:
+            questions.append(question)
+    return questions[:maximum]
+
+
+def run_batch_questions(questions: list[str], as_of: date) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Run a batch through the same safe question engine used by the chat."""
+    summary_rows: list[dict[str, Any]] = []
+    details: list[dict[str, Any]] = []
+    for index, question in enumerate(questions, start=1):
+        try:
+            answer, result, plan = ask_streamvault(question, as_of)
+            if plan.get("needs_ranking_follow_up"):
+                status = "Needs follow-up"
+            elif result is None or result.empty:
+                status = "No matches"
+            else:
+                status = "Completed"
+            row_count = 0 if result is None else len(result)
+            summary_rows.append({
+                "#": index,
+                "Question": question,
+                "Status": status,
+                "Matching rows": row_count,
+                "Analysis summary": plan.get("interpretation", ""),
+            })
+            details.append({"question": question, "answer": answer, "result": result, "plan": plan, "status": status})
+        except Exception as exc:
+            summary_rows.append({
+                "#": index,
+                "Question": question,
+                "Status": "Needs review",
+                "Matching rows": 0,
+                "Analysis summary": "StreamVault could not complete this check safely.",
+            })
+            details.append({"question": question, "answer": str(exc), "result": pd.DataFrame(), "plan": {}, "status": "Needs review"})
+    return pd.DataFrame(summary_rows), details
+
+
 def format_result(df: pd.DataFrame):
     display = df.copy()
     formats = {}
@@ -1000,10 +1045,15 @@ if metrics["future"]:
     st.warning(f"Data quality: {metrics['future']} catalog records are dated after {as_of:%B %d, %Y} and are excluded from current metrics.")
 
 st.session_state.setdefault("question_dialog_open", False)
+st.session_state.setdefault("batch_debugger_open", False)
 
 
 def close_question_dialog():
     st.session_state.question_dialog_open = False
+
+
+def close_batch_debugger():
+    st.session_state.batch_debugger_open = False
 
 
 @st.dialog("Ask StreamVault", width="large", icon=":material/auto_awesome:", on_dismiss=close_question_dialog)
@@ -1091,11 +1141,67 @@ def show_question_dialog():
         st.rerun()
 
 
+@st.dialog("Batch Debugger", width="large", icon=":material/fact_check:", on_dismiss=close_batch_debugger)
+def show_batch_debugger():
+    st.write("Run up to 25 plain-English catalog questions at once. StreamVault records the outcome and matching-row count for each check.")
+    with st.form("batch_debugger_form"):
+        batch_text = st.text_area(
+            "Questions to check (one per line)",
+            value=(
+                "How many South Korean thriller titles have an audience score of at least 85?\n"
+                "Compare licensed, original, and exclusive content by average cost, audience score, critic score, and viewing hours.\n"
+                "Show the 15 Spanish-language dramas with the highest viewing hours."
+            ),
+            height=180,
+            key="batch_debugger_questions",
+        )
+        submitted = st.form_submit_button("Run batch checks", type="primary", icon=":material/play_arrow:")
+
+    if submitted:
+        questions = parse_batch_questions(batch_text)
+        if not questions:
+            st.warning("Enter at least one question to run a batch check.")
+        else:
+            with st.spinner(f"Checking {len(questions)} question{'s' if len(questions) != 1 else ''}..."):
+                summary, details = run_batch_questions(questions, as_of)
+            st.session_state.batch_debug_summary = summary
+            st.session_state.batch_debug_details = details
+
+    summary = st.session_state.get("batch_debug_summary")
+    details = st.session_state.get("batch_debug_details", [])
+    if summary is not None and not summary.empty:
+        completed = int((summary["Status"] == "Completed").sum())
+        needs_attention = len(summary) - completed
+        first, second = st.columns(2)
+        first.metric("Completed", completed)
+        second.metric("Needs attention", needs_attention)
+        st.dataframe(summary, hide_index=True)
+        st.download_button(
+            "Download batch report",
+            summary.to_csv(index=False).encode("utf-8"),
+            "streamvault_batch_debug_report.csv",
+            "text/csv",
+            key="download_batch_debug_report",
+        )
+        for index, detail in enumerate(details, start=1):
+            with st.expander(f"{index}. {detail['status']}: {detail['question']}"):
+                st.markdown(detail["answer"])
+                if detail["result"] is not None and not detail["result"].empty:
+                    st.dataframe(format_result(detail["result"]), hide_index=True)
+
+    if st.button("Close batch debugger", icon=":material/close:"):
+        st.session_state.batch_debugger_open = False
+        st.rerun()
+
+
 tabs = st.tabs(["Overview", "Data Dictionary", "Trends", "Catalog Explorer"])
 
 with tabs[0]:
-    if st.button("Ask StreamVault", type="primary", icon=":material/auto_awesome:"):
+    ask_button, batch_button = st.columns(2)
+    if ask_button.button("Ask StreamVault", type="primary", icon=":material/auto_awesome:"):
         st.session_state.question_dialog_open = True
+    if batch_button.button("Open Batch Debugger", icon=":material/fact_check:"):
+        st.session_state.batch_debugger_open = True
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Catalog Titles", f"{metrics['total']:,}")
     c2.metric("Movies", f"{metrics['movies']:,}", f"{movie_share:.1f}%")
@@ -1116,6 +1222,8 @@ with tabs[0]:
 
 if st.session_state.question_dialog_open:
     show_question_dialog()
+if st.session_state.batch_debugger_open:
+    show_batch_debugger()
 
 with tabs[1]:
     st.subheader("Catalog data dictionary")
