@@ -52,6 +52,41 @@ SCHEMA = {
     "description": "Content description/synopsis (text)",
 }
 
+# Built-in QA coverage for the catalog question engine. The Batch Debugger can
+# load and execute this suite without requiring users to write SQL or code.
+DEBUG_QUESTIONS = [
+    {"id": 8, "category": "Ranking and grouping", "question": "Which 10 countries have the highest average viewing hours, and what are their average audience scores?", "expected": "Ten countries ranked by average viewing hours."},
+    {"id": 9, "category": "Licensing", "question": "Which 20 licenses expire in the next 90 days, ranked from highest to lowest viewing hours?", "expected": "Twenty rows ranked by viewing hours; leading title is Thriller Chronicles 6061."},
+    {"id": 10, "category": "Licensing", "question": "Show the 10 licenses expiring in the next 30 days with the highest viewing hours.", "expected": "Ten rows dated between the report date and 30 days after it."},
+    {"id": 11, "category": "Licensing and thresholds", "question": "Which licenses expire in the next 90 days and have more than 15 million viewing hours? Rank them by viewing hours.", "expected": "Only licenses within 90 days with viewing hours above 15,000,000."},
+    {"id": 12, "category": "Licensing and grouping", "question": "How many licenses expire in the next 90 days in each genre?", "expected": "Counts grouped by genre; total is 430 as of July 24, 2026."},
+    {"id": 13, "category": "Licensing and ranking", "question": "Show the 20 expired licenses ranked first by viewing hours and then by audience score.", "expected": "Expired licenses only, ordered by viewing hours then audience score descending."},
+    {"id": 14, "category": "Value analysis", "question": "Rank every genre by average audience score per million dollars spent.", "expected": "Genre efficiency ranking; leaders are Thriller, Reality, and Crime."},
+    {"id": 15, "category": "Value analysis", "question": "Which genres generate the most viewing hours per dollar spent? Include title count, average cost, and average viewing hours.", "expected": "Genres ranked by viewing-hours-per-dollar efficiency."},
+    {"id": 16, "category": "Multiple thresholds", "question": "Show the 20 titles that cost less than 5 million dollars, have an audience score of at least 85, and have the highest viewing hours.", "expected": "At most 20 titles satisfying both thresholds, ranked by viewing hours."},
+    {"id": 17, "category": "Multiple thresholds", "question": "Find titles costing more than 10 million dollars with an audience score below 65 and a completion rate below 60 percent.", "expected": "Every row satisfies all three conditions."},
+    {"id": 18, "category": "Multiple values", "question": "Compare average cost and viewing hours across North America, APAC, Europe, and LATAM.", "expected": "Four requested regions with both averages."},
+    {"id": 19, "category": "Time comparisons", "question": "Compare the number of titles added in the second quarter of 2026 with the first quarter of 2026 by genre.", "expected": "Genre counts for Q1 2026 and Q2 2026."},
+    {"id": 20, "category": "Time comparisons", "question": "Did the share of documentaries added this quarter increase or decrease compared with the previous quarter?", "expected": "Current share about 5.9%, prior share about 8.4%, a decrease of about 2.5 percentage points."},
+    {"id": 21, "category": "Percentage and ranking", "question": "What percentage of titles added this quarter are international, and which five countries contributed the most titles?", "expected": "International share about 64.5%, followed by five leading countries."},
+    {"id": 22, "category": "Recent additions", "question": "Show the 20 titles added during the last 90 days with the highest viewing hours.", "expected": "Twenty titles in the trailing 90-day period, ranked by viewing hours."},
+    {"id": 23, "category": "Year comparison", "question": "Compare the number and average cost of original, licensed, and exclusive titles added in 2025 versus 2026.", "expected": "Uses Date Added, not Release Year."},
+    {"id": 24, "category": "Theme search", "question": "Find titles about friendship or coming of age, then rank the results by audience score.", "expected": "Theme matches ranked by audience score; 3,325 source matches before display limit."},
+    {"id": 25, "category": "Theme and filters", "question": "Find family-oriented titles about friendship, survival, or love that are available in North America and have an audience score of at least 85.", "expected": "Theme, region, and audience-score conditions all apply."},
+    {"id": 26, "category": "Exclusion logic", "question": "Find drama titles about friendship that are not from the United States.", "expected": "Drama and friendship matches excluding United States records."},
+    {"id": 27, "category": "Exact title", "question": 'Show every catalog field for "Documentary Chronicles 346".', "expected": "One exact-title record with all 26 fields."},
+    {"id": 28, "category": "Ambiguity", "question": "Show content from Georgia.", "expected": "Interpret Georgia as a valid catalog country."},
+    {"id": 28.1, "category": "Ambiguity", "question": "Show content about Georgia.", "expected": "Interpret Georgia as a text or theme search."},
+    {"id": 29, "category": "Impossible conditions", "question": "Find Japanese-language westerns from Brazil with an audience score above 100.", "expected": "Zero results while preserving every requested condition."},
+    {"id": 30, "category": "Clarification", "question": "Which titles are the most successful?", "expected": "Request a success metric instead of guessing."},
+    {"id": 31, "category": "Conflicting instructions", "question": "Show the 10 highest-viewed titles, sorted from lowest to highest viewing hours.", "expected": "Identify conflicting ranking instructions."},
+    {"id": 32, "category": "Result limits", "question": "Show the top 500 titles by viewing hours.", "expected": "Enforce the 100-row safety limit and explain it."},
+    {"id": 33, "category": "Invalid dates", "question": "Show titles added between December 31, 2026 and January 1, 2026.", "expected": "Explain that the start date is after the end date."},
+    {"id": 34, "category": "Null and quality checks", "question": "How many movies have seasons or episode values even though they are movies?", "expected": "Count movies where Seasons or Episodes is not null."},
+    {"id": 35, "category": "Duplicate detection", "question": "Identify duplicate title names and show how many times each title appears.", "expected": "Group by title and return only counts above one."},
+    {"id": 36, "category": "Column comparison", "question": "Find records with a license expiration date earlier than the date the title was added.", "expected": "Compare License Expiration directly with Date Added."},
+]
+
 @st.cache_resource
 def get_connection() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
@@ -840,7 +875,7 @@ def ask_streamvault(question: str, as_of: date):
         }
 
 
-def parse_batch_questions(text: str, maximum: int = 25) -> list[str]:
+def parse_batch_questions(text: str, maximum: int = 40) -> list[str]:
     """Turn one-question-per-line input into a bounded batch of prompts."""
     questions = []
     for line in text.splitlines():
@@ -852,6 +887,7 @@ def parse_batch_questions(text: str, maximum: int = 25) -> list[str]:
 
 def run_batch_questions(questions: list[str], as_of: date) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Run a batch through the same safe question engine used by the chat."""
+    regression_lookup = {item["question"]: item for item in DEBUG_QUESTIONS}
     summary_rows: list[dict[str, Any]] = []
     details: list[dict[str, Any]] = []
     for index, question in enumerate(questions, start=1):
@@ -864,20 +900,28 @@ def run_batch_questions(questions: list[str], as_of: date) -> tuple[pd.DataFrame
             else:
                 status = "Completed"
             row_count = 0 if result is None else len(result)
+            regression = regression_lookup.get(question, {})
             summary_rows.append({
                 "#": index,
+                "Test ID": regression.get("id", ""),
+                "Category": regression.get("category", "Ad hoc"),
                 "Question": question,
                 "Status": status,
                 "Matching rows": row_count,
+                "Expected behavior": regression.get("expected", ""),
                 "Analysis summary": plan.get("interpretation", ""),
             })
             details.append({"question": question, "answer": answer, "result": result, "plan": plan, "status": status})
         except Exception as exc:
+            regression = regression_lookup.get(question, {})
             summary_rows.append({
                 "#": index,
+                "Test ID": regression.get("id", ""),
+                "Category": regression.get("category", "Ad hoc"),
                 "Question": question,
                 "Status": "Needs review",
                 "Matching rows": 0,
+                "Expected behavior": regression.get("expected", ""),
                 "Analysis summary": "StreamVault could not complete this check safely.",
             })
             details.append({"question": question, "answer": str(exc), "result": pd.DataFrame(), "plan": {}, "status": "Needs review"})
@@ -1143,7 +1187,13 @@ def show_question_dialog():
 
 @st.dialog("Batch Debugger", width="large", icon=":material/fact_check:", on_dismiss=close_batch_debugger)
 def show_batch_debugger():
-    st.write("Run up to 25 plain-English catalog questions at once. StreamVault records the outcome and matching-row count for each check.")
+    st.write("Run up to 40 plain-English catalog questions at once. StreamVault records the outcome and matching-row count for each check.")
+    if st.button("Load automated regression suite", icon=":material/playlist_add_check:"):
+        st.session_state.batch_debugger_questions = "\n".join(item["question"] for item in DEBUG_QUESTIONS)
+        st.session_state.batch_debug_summary = None
+        st.session_state.batch_debug_details = []
+        st.rerun()
+    st.caption(f"The built-in regression suite contains {len(DEBUG_QUESTIONS)} catalog questions with expected behavior notes.")
     with st.form("batch_debugger_form"):
         batch_text = st.text_area(
             "Questions to check (one per line)",

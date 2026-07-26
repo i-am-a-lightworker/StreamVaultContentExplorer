@@ -4,3 +4,5 @@ __pycache__/
 .streamlit/secrets.toml
 .streamlit/Secrets
 .streamlit/*.log
+streamlit.stdout.log
+streamlit.stderr.log
