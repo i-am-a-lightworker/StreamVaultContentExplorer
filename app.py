@@ -11,6 +11,7 @@ from difflib import get_close_matches
 
 import duckdb
 import pandas as pd
+import altair as alt
 import plotly.express as px
 import streamlit as st
 
@@ -152,6 +153,8 @@ def detect_limit(question: str, default: int = 20) -> int:
     match = re.search(r"\b(?:top|first|highest|lowest|best|worst)\s+(\d{1,3})\b", q)
     if not match:
         match = re.search(r"\b(\d{1,3})\s+(?:titles|records|movies|shows|items)\b", q)
+    if not match:
+        match = re.search(r"\b(?:show|list|find|give|return)\s+(?:the\s+)?(\d{1,3})\b", q)
     return max(1, min(int(match.group(1)), 100)) if match else default
 
 
@@ -175,7 +178,7 @@ DIMENSION_MAP = {
     "studio": ["studio", "studios"],
     "production_company": ["production company", "production companies", "producer"],
     "rating": ["rating", "ratings", "maturity"],
-    "acquisition_type": ["acquisition type", "acquisition"],
+    "acquisition_type": ["acquisition type", "acquisition", "licensed", "original", "exclusive"],
     "region_availability": ["region", "regions", "availability"],
     "featured_collection": ["collection", "collections"],
     "release_year": ["release year", "year"],
@@ -208,9 +211,56 @@ def detect_dimension(question: str) -> str | None:
     return None
 
 
+RANKING_FOLLOW_UPS = {
+    "Highest average viewing hours": "Rank these results by highest average viewing hours.",
+    "Highest average audience score": "Rank these results by highest average audience score.",
+    "Highest average completion rate": "Rank these results by highest average completion rate.",
+    "Lowest average cost": "Rank these results by lowest average cost.",
+}
+
+
+def comparison_rank_metric(question: str, metrics: list[str]) -> tuple[str, str] | None:
+    """Return an explicitly requested comparison ranking, if the user gave one."""
+    q = question.lower()
+    markers = ["rank these results", "rank by", "ranked by"]
+    marker_positions = [q.rfind(marker) for marker in markers if marker in q]
+    if not marker_positions:
+        return None
+    ranking_text = q[max(marker_positions):]
+    for metric in metrics:
+        if any(phrase in ranking_text for phrase in METRIC_MAP[metric]):
+            ascending = metric == "cost_usd" and any(word in ranking_text for word in ["lowest", "least", "cheapest"])
+            return metric, "ASC" if ascending else "DESC"
+    return None
+
+
+def requires_ranking_follow_up(question: str, as_of: date) -> bool:
+    """Identify a multi-metric comparison with an undefined meaning of 'top'."""
+    q = question.lower()
+    has_top_limit = bool(re.search(r"\btop\s+\d{1,3}\b", q))
+    is_comparison = any(word in q for word in ["compare", "average", "avg", "mean"])
+    metrics = detect_metrics(question)
+    return (
+        has_top_limit
+        and is_comparison
+        and detect_dimension(question) is not None
+        and len(metrics) > 1
+        and comparison_rank_metric(question, metrics) is None
+    )
+
+
 def known_values(column: str, as_of: date) -> list[str]:
     df = query(f"SELECT DISTINCT {column} AS value FROM catalog WHERE date_added <= ? AND {column} IS NOT NULL ORDER BY value", [as_of])
     return [str(v) for v in df["value"].tolist() if str(v).strip()]
+
+
+def genre_is_mentioned(genre: str, question: str) -> bool:
+    """Match catalog genres in natural singular or plural wording."""
+    value = genre.lower()
+    forms = {value, f"{value}s"}
+    if value.endswith("y"):
+        forms.add(f"{value[:-1]}ies")
+    return any(re.search(rf"\b{re.escape(form)}\b", question) for form in forms)
 
 
 def selected_genres(question: str, as_of: date) -> list[str]:
@@ -218,8 +268,34 @@ def selected_genres(question: str, as_of: date) -> list[str]:
     q = question.lower()
     return [
         value for value in known_values("genre", as_of)
-        if len(value) >= 3 and re.search(rf"\b{re.escape(value.lower())}\b", q)
+        if len(value) >= 3 and genre_is_mentioned(value, q)
     ]
+
+
+COUNTRY_ADJECTIVES = {
+    # Catalog country names are nouns, while people naturally use demonyms.
+    # Each alias still resolves to a known, parameterized catalog value.
+    "south korea": ("south korean",),
+    "north korea": ("north korean",),
+    "united states": ("american", "u.s.", "u.s.a."),
+    "united kingdom": ("british", "uk", "u.k."),
+}
+
+
+def catalog_value_is_mentioned(column: str, value: str, question: str) -> bool:
+    """Recognize catalog values in plain English, including common demonyms."""
+    normalized_value = value.lower()
+    # Do not turn the language word inside a country demonym (for example,
+    # "South Korean") into an additional language filter.
+    if column == "original_language" and re.search(
+        rf"\b(?:south|north)\s+{re.escape(normalized_value)}\b", question
+    ):
+        return False
+    if normalized_value in question:
+        return True
+    return column == "country" and any(
+        alias in question for alias in COUNTRY_ADJECTIVES.get(normalized_value, ())
+    )
 
 
 def value_filter(question: str, as_of: date) -> tuple[list[str], list[Any], list[str]]:
@@ -238,7 +314,7 @@ def value_filter(question: str, as_of: date) -> tuple[list[str], list[Any], list
     # A question may name several genres, such as "Action, Comedy and Drama".
     # Use one IN filter so all requested genre categories are included.
     genre_values = known_values("genre", as_of)
-    genre_matches = [v for v in genre_values if len(v) >= 3 and re.search(rf"\b{re.escape(v.lower())}\b", q)]
+    genre_matches = [v for v in genre_values if len(v) >= 3 and genre_is_mentioned(v, q)]
     if genre_matches:
         placeholders = ", ".join("?" for _ in genre_matches)
         conditions.append(f"lower(genre) IN ({placeholders})")
@@ -250,11 +326,15 @@ def value_filter(question: str, as_of: date) -> tuple[list[str], list[Any], list
 
     for column in ["country", "original_language", "rating", "studio", "acquisition_type", "featured_collection"]:
         values = known_values(column, as_of)
-        matches = [v for v in values if len(v) >= 3 and v.lower() in q]
+        matches = [v for v in values if len(v) >= 3 and catalog_value_is_mentioned(column, v, q)]
         if matches:
-            conditions.append(f"lower({column}) = ?")
-            params.append(matches[0].lower())
-            notes.append(f"{LABELS[column]} = {matches[0]}")
+            placeholders = ", ".join("?" for _ in matches)
+            conditions.append(f"lower({column}) IN ({placeholders})")
+            params.extend(value.lower() for value in matches)
+            if len(matches) == 1:
+                notes.append(f"{LABELS[column]} = {matches[0]}")
+            else:
+                notes.append(f"{LABELS[column]} in {', '.join(matches)}")
 
     year_match = re.search(r"\b(19|20)\d{2}\b", q)
     if year_match:
@@ -264,7 +344,7 @@ def value_filter(question: str, as_of: date) -> tuple[list[str], list[Any], list
             params.append(year)
             notes.append(f"release year {year}")
 
-    score_match = re.search(r"(?:audience|critic)?\s*score\s*(?:above|over|greater than|at least)\s*(\d+(?:\.\d+)?)", q)
+    score_match = re.search(r"(?:audience|critic)?\s*score(?:\s+of)?\s*(?:above|over|greater than|at least)\s*(\d+(?:\.\d+)?)", q)
     if score_match:
         metric = "critic_score" if "critic" in q else "audience_score"
         conditions.append(f"{metric} >= ?")
@@ -494,6 +574,17 @@ def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame
     where = " AND ".join(conditions)
     metrics = detect_metrics(question)
     dimension = detect_dimension(question)
+    if requires_ranking_follow_up(question, as_of):
+        answer = (
+            "**Quick clarification:** What should **top** mean for this comparison? "
+            "Choose the measure StreamVault should use to rank the results."
+        )
+        return answer, pd.DataFrame(), {
+            "interpretation": "A ranking measure is required before the comparison can be limited to top results.",
+            "sql": "",
+            "needs_ranking_follow_up": True,
+            "ranking_options": RANKING_FOLLOW_UPS,
+        }
     genres_in_question = selected_genres(question, as_of)
     # Naming two or more genres implies a genre comparison/grouping even when
     # the user does not explicitly type the word "genre".
@@ -564,8 +655,32 @@ def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame
             result = query(sql, params)
             title = f"Title count by {LABELS[dimension].lower()}"
         else:
-            sql = f"SELECT COUNT(*) AS \"Title Count\" FROM catalog WHERE {where}"
-            result = query(sql, params)
+            count_sql = f"SELECT COUNT(*) AS \"Title Count\" FROM catalog WHERE {where}"
+            count_result = query(count_sql, params)
+            count = int(count_result.iloc[0]["Title Count"] or 0)
+            # When the question is explicitly about titles, show the audited
+            # records as well as the headline count. This makes every country,
+            # genre, and numeric threshold visible in the table.
+            if "title" in q:
+                sql = f"""
+                    SELECT title AS "Title", content_type AS "Type", country AS "Country",
+                           original_language AS "Language", genre AS "Genre",
+                           audience_score AS "Audience Score", critic_score AS "Critic Score",
+                           viewing_hours AS "Viewing Hours", completion_rate AS "Completion Rate"
+                    FROM catalog
+                    WHERE {where}
+                    ORDER BY audience_score DESC NULLS LAST, viewing_hours DESC NULLS LAST, title
+                    LIMIT {MAX_RESULT_ROWS}
+                """
+                result = query(sql, params)
+                shown = len(result)
+                answer = f"**Catalog count:** {count:,} matching titles."
+                answer += f" The supporting table lists {'all' if shown == count else f'the first {shown:,}'} matching titles."
+                if notes:
+                    answer += f" Filters applied: {', '.join(notes)}."
+                return answer, result, {"interpretation": "Catalog count with matching title records", "sql": sql}
+            sql = count_sql
+            result = count_result
             title = "Catalog count"
         return make_answer(title, result, notes), result, {"interpretation": title, "sql": sql}
 
@@ -596,7 +711,13 @@ def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame
         agg = [f"COUNT(*) AS \"Title Count\""]
         for m in use_metrics:
             agg.append(f"AVG({m}) AS \"Average {LABELS[m]}\"")
-        sql = f"SELECT {dimension} AS \"{LABELS[dimension]}\", {', '.join(agg)} FROM catalog WHERE {where} GROUP BY {dimension} ORDER BY \"Title Count\" DESC LIMIT {limit}"
+        ranking = comparison_rank_metric(question, use_metrics)
+        if ranking:
+            ranking_metric, direction = ranking
+            order_by = f"\"Average {LABELS[ranking_metric]}\" {direction} NULLS LAST"
+        else:
+            order_by = "\"Title Count\" DESC"
+        sql = f"SELECT {dimension} AS \"{LABELS[dimension]}\", {', '.join(agg)} FROM catalog WHERE {where} GROUP BY {dimension} ORDER BY {order_by} LIMIT {limit}"
         result = query(sql, params)
         title = f"Comparison by {LABELS[dimension].lower()}"
         return make_answer(title, result, notes), result, {"interpretation": title, "sql": sql}
@@ -672,11 +793,22 @@ def ask_streamvault(question: str, as_of: date):
     # every catalog field. The deterministic engine remains a private fallback.
     planner_note = ""
     named_genres = selected_genres(question, as_of)
+    acquisition_terms = ("licensed", "original", "exclusive")
+    if sum(term in question.lower() for term in acquisition_terms) >= 2 and any(word in question.lower() for word in ["compare", "average", "avg", "mean"]):
+        # This keeps explicit acquisition-type comparisons constrained to the
+        # categories named by the user, even without an AI planner key.
+        return local_question_engine(question, as_of)
+    if requires_ranking_follow_up(question, as_of):
+        return local_question_engine(question, as_of)
     if len(named_genres) >= 2 and any(term in question.lower() for term in ["top", "title", "titles", "show me", "list"]):
         # This deterministic route guarantees an even rotation across every
         # named genre before the total result limit is applied.
         return local_question_engine(question, as_of)
     if "international" in question.lower() and "recent" in question.lower() and any(word in question.lower() for word in ["percentage", "percent", "share"]):
+        return local_question_engine(question, as_of)
+    if any(phrase in question.lower() for phrase in ["how many", "number of", "count of", "total titles"]):
+        # Count questions need an auditable deterministic filter path. Title
+        # counts return their matching records for review.
         return local_question_engine(question, as_of)
     if any(phrase in question.lower() for phrase in ["year over year", "year-over-year", "yoy"]) and "documentar" in question.lower():
         return local_question_engine(question, as_of)
@@ -754,6 +886,35 @@ def render_result_chart(result: pd.DataFrame) -> bool:
     """Render a clear automatic chart when a result has comparable rows."""
     if result is None or result.empty or len(result) < 2:
         return False
+
+    # Movie-versus-TV comparisons deserve a dedicated chart: fixed colors keep
+    # the categories visually distinct and the completion percentage is shown
+    # directly on each bar.
+    if {"Type", "Average Completion Rate"}.issubset(result.columns) and result["Type"].nunique(dropna=True) >= 2:
+        chart_data = result.copy()
+        chart_data["Completion label"] = chart_data["Average Completion Rate"].map(lambda value: f"{value:.1f}%" if pd.notna(value) else "")
+        tooltips = [
+            alt.Tooltip("Type:N", title="Content type"),
+            alt.Tooltip("Average Completion Rate:Q", title="Completion rate (%)", format=".1f"),
+        ]
+        for column in ["Title Count", "Average Cost (USD)", "Average Audience Score", "Average Critic Score", "Average Viewing Hours"]:
+            if column in chart_data.columns:
+                tooltips.append(alt.Tooltip(f"{column}:Q", title=column, format="$,.0f" if "Cost" in column else ",.1f"))
+        color = alt.Color(
+            "Type:N",
+            title="Content type",
+            scale=alt.Scale(domain=["Movie", "TV Show"], range=["#2563eb", "#f97316"]),
+        )
+        bars = alt.Chart(chart_data).mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5).encode(
+            x=alt.X("Type:N", title=None, sort=["Movie", "TV Show"]),
+            y=alt.Y("Average Completion Rate:Q", title="Average completion rate (%)", scale=alt.Scale(domain=[0, 100])),
+            color=color,
+            tooltip=tooltips,
+        )
+        labels = bars.mark_text(dy=-10, color="#111827", fontWeight="bold").encode(text="Completion label:N")
+        st.markdown("#### Completion-rate comparison")
+        st.altair_chart((bars + labels).properties(height=310), width="stretch")
+        return True
 
     numeric_columns = []
     for column in result.columns:
@@ -838,7 +999,14 @@ doc_prev_share = pct(metrics["doc_previous"], metrics["previous"])
 if metrics["future"]:
     st.warning(f"Data quality: {metrics['future']} catalog records are dated after {as_of:%B %d, %Y} and are excluded from current metrics.")
 
-@st.dialog("Ask StreamVault", width="large", icon=":material/auto_awesome:")
+st.session_state.setdefault("question_dialog_open", False)
+
+
+def close_question_dialog():
+    st.session_state.question_dialog_open = False
+
+
+@st.dialog("Ask StreamVault", width="large", icon=":material/auto_awesome:", on_dismiss=close_question_dialog)
 def show_question_dialog():
     st.write("Ask any catalog question in plain English. StreamVault can combine fields, filters, rankings, comparisons, and timeframes for you.")
 
@@ -866,8 +1034,20 @@ def show_question_dialog():
                 render_result_chart(message["data"])
                 st.dataframe(format_result(message["data"]), hide_index=True)
 
+    selected_follow_up = None
+    pending_follow_up = st.session_state.get("pending_ranking_follow_up")
+    if pending_follow_up:
+        selected_choice = st.pills(
+            "Rank the comparison by",
+            list(pending_follow_up["options"]),
+            key=f"ranking_follow_up_{len(st.session_state.messages)}",
+        )
+        if selected_choice:
+            selected_follow_up = pending_follow_up["question"] + " " + pending_follow_up["options"][selected_choice]
+            st.session_state.pending_ranking_follow_up = None
+
     entered = st.chat_input("Ask a question in plain English about the catalog", submit_mode="disable")
-    question = entered or selected
+    question = selected_follow_up or entered or selected
     if question:
         st.session_state.messages.append({"role": "user", "content": question})
         with st.chat_message("user"):
@@ -876,20 +1056,38 @@ def show_question_dialog():
             with st.spinner("Analyzing all relevant catalog fields..."):
                 answer, result, plan = ask_streamvault(question, as_of)
                 st.markdown(answer)
+                needs_ranking_follow_up = bool(plan.get("needs_ranking_follow_up"))
                 if plan:
                     with st.expander("How StreamVault analyzed this question"):
                         st.write(plan.get("interpretation", ""))
+                if needs_ranking_follow_up:
+                    st.session_state.pending_ranking_follow_up = {
+                        "question": question,
+                        "options": plan["ranking_options"],
+                    }
                 if result is not None and not result.empty:
                     render_result_chart(result)
                     st.markdown("#### Supporting data")
                     st.dataframe(format_result(result), hide_index=True)
                     st.download_button("Download these results", result.to_csv(index=False).encode("utf-8"), "streamvault_question_results.csv", "text/csv", key=f"download_{len(st.session_state.messages)}")
-                elif result is not None:
+                elif result is not None and not needs_ranking_follow_up:
                     st.info("No catalog records matched the interpreted question.")
                 st.session_state.messages.append({"role": "assistant", "content": answer, "data": result})
+                if needs_ranking_follow_up:
+                    st.rerun()
+                st.success("Ask another question below, or select Inquiry complete when you are finished.")
 
-    if st.button("Clear conversation", icon=":material/delete_sweep:"):
+    with st.container(horizontal=True):
+        start_new = st.button("Start a new inquiry", icon=":material/refresh:")
+        complete = st.button("Inquiry complete", type="primary", icon=":material/check_circle:")
+    if start_new:
         st.session_state.messages = []
+        st.session_state.pending_ranking_follow_up = None
+        st.rerun()
+    if complete:
+        st.session_state.messages = []
+        st.session_state.pending_ranking_follow_up = None
+        st.session_state.question_dialog_open = False
         st.rerun()
 
 
@@ -897,7 +1095,7 @@ tabs = st.tabs(["Overview", "Data Dictionary", "Trends", "Catalog Explorer"])
 
 with tabs[0]:
     if st.button("Ask StreamVault", type="primary", icon=":material/auto_awesome:"):
-        show_question_dialog()
+        st.session_state.question_dialog_open = True
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Catalog Titles", f"{metrics['total']:,}")
     c2.metric("Movies", f"{metrics['movies']:,}", f"{movie_share:.1f}%")
@@ -915,6 +1113,9 @@ with tabs[0]:
     with right:
         genre_df = query('SELECT genre AS "Genre", COUNT(*) AS "Titles" FROM catalog WHERE date_added <= ? GROUP BY genre ORDER BY "Titles" DESC LIMIT 10', [as_of])
         st.plotly_chart(px.bar(genre_df.sort_values("Titles"), x="Titles", y="Genre", orientation="h", title="Top Genres"), use_container_width=True)
+
+if st.session_state.question_dialog_open:
+    show_question_dialog()
 
 with tabs[1]:
     st.subheader("Catalog data dictionary")
