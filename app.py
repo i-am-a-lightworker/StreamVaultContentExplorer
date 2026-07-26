@@ -1,5 +1,6 @@
 from __future__ import annotations
 import time
+import tracemalloc
 from datetime import date, timedelta
 from pathlib import Path
 import json
@@ -928,6 +929,57 @@ def run_batch_questions(questions: list[str], as_of: date) -> tuple[pd.DataFrame
     return pd.DataFrame(summary_rows), details
 
 
+def data_quality_report() -> pd.DataFrame:
+    """Run complete-catalog data-quality checks."""
+    checks = [
+        ("Missing Content IDs", "SELECT COUNT(*) FROM catalog WHERE content_id IS NULL OR trim(content_id) = ''"),
+        ("Duplicate Content IDs", "SELECT COUNT(*) FROM (SELECT content_id FROM catalog GROUP BY content_id HAVING COUNT(*) > 1)"),
+        ("Duplicate titles", "SELECT COUNT(*) FROM (SELECT title FROM catalog GROUP BY title HAVING COUNT(*) > 1)"),
+        ("Invalid dates", "SELECT COUNT(*) FROM catalog WHERE date_added IS NULL OR license_expiration IS NULL"),
+        ("License before Date Added", "SELECT COUNT(*) FROM catalog WHERE license_expiration < date_added"),
+        ("Scores outside 0–100", "SELECT COUNT(*) FROM catalog WHERE audience_score NOT BETWEEN 0 AND 100 OR critic_score NOT BETWEEN 0 AND 100"),
+        ("Completion rates outside 0–100", "SELECT COUNT(*) FROM catalog WHERE completion_rate NOT BETWEEN 0 AND 100"),
+        ("Negative cost or viewing hours", "SELECT COUNT(*) FROM catalog WHERE cost_usd < 0 OR viewing_hours < 0"),
+        ("Movies with seasons or episodes", "SELECT COUNT(*) FROM catalog WHERE content_type = 'Movie' AND (seasons IS NOT NULL OR episodes IS NOT NULL)"),
+        ("TV shows missing seasons or episodes", "SELECT COUNT(*) FROM catalog WHERE content_type = 'TV Show' AND (seasons IS NULL OR episodes IS NULL)"),
+        ("Blank country, genre, language, or type", "SELECT COUNT(*) FROM catalog WHERE coalesce(trim(country), '') = '' OR coalesce(trim(genre), '') = '' OR coalesce(trim(original_language), '') = '' OR coalesce(trim(content_type), '') = ''"),
+    ]
+    rows = []
+    for name, sql in checks:
+        count = int(scalar(sql) or 0)
+        rows.append({"Check": name, "Records flagged": count, "Status": "Pass" if count == 0 else "Review"})
+    return pd.DataFrame(rows)
+
+
+def expected_result_report(as_of: date) -> pd.DataFrame:
+    metrics = core_metrics(as_of)
+    top_hours = query("SELECT rating, AVG(viewing_hours) AS value FROM catalog WHERE date_added <= ? GROUP BY rating ORDER BY value DESC LIMIT 1", [as_of]).iloc[0]
+    top_completion = query("SELECT rating, AVG(completion_rate) AS value FROM catalog WHERE date_added <= ? GROUP BY rating ORDER BY value DESC LIMIT 1", [as_of]).iloc[0]
+    checks = [
+        ("Total titles", metrics["total"], 10000, 0), ("Movies", metrics["movies"], 5015, 0), ("TV shows", metrics["shows"], 4985, 0),
+        ("Countries", scalar("SELECT COUNT(DISTINCT country) FROM catalog WHERE date_added <= ?", [as_of]), 14, 0),
+        ("Genres", scalar("SELECT COUNT(DISTINCT genre) FROM catalog WHERE date_added <= ?", [as_of]), 13, 0),
+        ("International additions this quarter (%)", round(pct(metrics["international"], metrics["current"]), 1), 64.5, 0.25),
+        ("Documentary additions this quarter (%)", round(pct(metrics["doc_current"], metrics["current"]), 1), 5.9, 0.25),
+        ("Highest TV-MA average viewing hours", float(top_hours["value"]) if top_hours["rating"] == "TV-MA" else -1, 10383149, 250000),
+        ("Highest completion rate: TV-14 (%)", float(top_completion["value"]) if top_completion["rating"] == "TV-14" else -1, 72.14, 0.25),
+    ]
+    return pd.DataFrame([{"Check": name, "Actual": actual, "Expected": expected, "Status": "Pass" if abs(float(actual) - expected) <= tolerance else "Review"} for name, actual, expected, tolerance in checks])
+
+
+def sql_safety_report(details: list[dict], as_of: date) -> pd.DataFrame:
+    rows = []
+    for detail in details:
+        sql = detail.get("sql", "")
+        normalized = re.sub(r"\s+", " ", sql).lower()
+        safe, reason = is_safe_catalog_sql(sql, as_of) if sql else (False, "No SQL was supplied.")
+        limit_match = re.search(r"\blimit\s+(\d+)", normalized)
+        limit_ok = bool(limit_match) and int(limit_match.group(1)) <= MAX_RESULT_ROWS
+        path_ok = not bool(re.search(r"[a-z]:\\\\|/users/|read_csv|read_parquet", normalized))
+        rows.append({"Question": detail.get("question", ""), "Read-only and dated": safe, "Result limit": limit_ok, "No local path": path_ok, "Status": "Pass" if safe and limit_ok and path_ok else "Review", "Reason": reason})
+    return pd.DataFrame(rows)
+
+
 def format_result(df: pd.DataFrame):
     display = df.copy()
     formats = {}
@@ -1244,7 +1296,14 @@ def show_batch_debugger():
         st.rerun()
 
 
-tabs = st.tabs(["Overview", "Data Dictionary", "Trends", "Catalog Explorer"])
+tabs = st.tabs([
+    "Overview",
+    "Ask StreamVault",
+    "Data Dictionary",
+    "Trends",
+    "Catalog Explorer",
+    "Debugger",
+])
 
 with tabs[0]:
     ask_button, batch_button = st.columns(2)
@@ -1276,12 +1335,19 @@ if st.session_state.batch_debugger_open:
     show_batch_debugger()
 
 with tabs[1]:
+    st.subheader("Ask StreamVault")
+    st.write("Ask a plain-English question about any of the 26 catalog fields.")
+    if st.button("Open question assistant", type="primary", icon=":material/auto_awesome:"):
+        st.session_state.question_dialog_open = True
+        st.rerun()
+
+with tabs[2]:
     st.subheader("Catalog data dictionary")
     dictionary = pd.DataFrame([{"Field": k, "Meaning": v} for k, v in SCHEMA.items()])
     st.dataframe(dictionary, use_container_width=True, hide_index=True)
     st.caption("All 26 fields are available to the local question engine and the catalog explorer.")
 
-with tabs[2]:
+with tabs[3]:
     monthly = query("SELECT date_trunc('month', date_added) AS month, COUNT(*) AS titles_added FROM catalog WHERE date_added <= ? GROUP BY month ORDER BY month", [as_of])
     st.plotly_chart(px.line(monthly, x="month", y="titles_added", markers=True, title="Titles Added by Month"), use_container_width=True)
     quarterly = query("""
@@ -1297,7 +1363,7 @@ with tabs[2]:
     fig.update_yaxes(tickformat=".0%")
     st.plotly_chart(fig, use_container_width=True)
 
-with tabs[3]:
+with tabs[4]:
     f1, f2, f3, f4 = st.columns(4)
     countries = ["All"] + query("SELECT DISTINCT country FROM catalog ORDER BY country")["country"].tolist()
     genres = ["All"] + query("SELECT DISTINCT genre FROM catalog ORDER BY genre")["genre"].tolist()
@@ -1326,3 +1392,169 @@ with tabs[3]:
     st.caption(f"Showing {len(explorer):,} records (maximum 1,000).")
     st.dataframe(format_result(explorer), use_container_width=True, hide_index=True)
     st.download_button("Download filtered results", explorer.to_csv(index=False).encode("utf-8"), "streamvault_filtered_catalog.csv", "text/csv")
+
+
+# ---------- Batch Debugger ----------
+with tabs[5]:
+    st.subheader("Automated Question Debugger")
+    st.write("Run Questions 8–36 together and inspect how StreamVault interprets each question.")
+    st.warning("An OK result only means the question executed without crashing. Compare the interpretation, SQL, and output with the expected behavior to confirm accuracy.")
+
+    debug_categories = sorted({test["category"] for test in DEBUG_QUESTIONS})
+    selected_categories = st.multiselect("Question categories", options=debug_categories, default=debug_categories)
+    selected_tests = [test for test in DEBUG_QUESTIONS if test["category"] in selected_categories]
+
+    run_debug_suite = st.button(
+        f"Run {len(selected_tests)} Debug Tests",
+        type="primary",
+        icon=":material/play_arrow:",
+        width="stretch",
+    )
+    if run_debug_suite:
+        if not selected_tests:
+            st.warning("Select at least one question category before running the suite.")
+        else:
+            debug_summary = []
+            debug_details = []
+            progress = st.progress(0)
+            status_text = st.empty()
+            for position, test in enumerate(selected_tests, start=1):
+                status_text.write(f"Running Question {test['id']}: {test['question']}")
+                started = time.perf_counter()
+                try:
+                    answer, result, plan = ask_streamvault(test["question"], as_of)
+                    elapsed = time.perf_counter() - started
+                    interpretation = plan.get("interpretation", "") if plan else ""
+                    sql = plan.get("sql", "") if plan else ""
+                    debug_summary.append({
+                        "Question ID": test["id"], "Category": test["category"], "Status": "OK",
+                        "Result Rows": 0 if result is None else len(result),
+                        "Runtime (seconds)": round(elapsed, 3), "Interpretation": interpretation,
+                    })
+                    debug_details.append({**test, "status": "OK", "answer": answer, "result": result,
+                                          "interpretation": interpretation, "sql": sql, "runtime": elapsed, "error": ""})
+                except Exception as exc:
+                    elapsed = time.perf_counter() - started
+                    debug_summary.append({
+                        "Question ID": test["id"], "Category": test["category"], "Status": "ERROR",
+                        "Result Rows": 0, "Runtime (seconds)": round(elapsed, 3), "Interpretation": "",
+                    })
+                    debug_details.append({**test, "status": "ERROR", "answer": "", "result": None,
+                                          "interpretation": "", "sql": "", "runtime": elapsed, "error": str(exc)})
+                progress.progress(position / len(selected_tests))
+            status_text.empty()
+            st.session_state.debug_summary = debug_summary
+            st.session_state.debug_details = debug_details
+
+    if "debug_summary" in st.session_state:
+        summary_df = pd.DataFrame(st.session_state.debug_summary)
+        total_tests = len(summary_df)
+        error_count = int((summary_df["Status"] == "ERROR").sum())
+        completed_count = total_tests - error_count
+        average_runtime = summary_df["Runtime (seconds)"].mean()
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Tests Run", total_tests)
+        col2.metric("Completed", completed_count)
+        col3.metric("Errors", error_count)
+        col4.metric("Average Runtime", f"{average_runtime:.3f}s")
+        st.markdown("### Test Summary")
+        st.dataframe(summary_df, width="stretch", hide_index=True)
+        st.download_button(
+            "Download Debug Summary", summary_df.to_csv(index=False).encode("utf-8"),
+            "streamvault_debug_summary.csv", "text/csv", width="stretch",
+        )
+        st.markdown("### Detailed Results")
+        for detail in st.session_state.debug_details:
+            icon = "✅" if detail["status"] == "OK" else "❌"
+            with st.expander(f"{icon} Question {detail['id']} — {detail['category']}"):
+                st.markdown("**Question**")
+                st.write(detail["question"])
+                st.markdown("**Expected behavior**")
+                st.info(detail["expected"])
+                st.markdown("**StreamVault answer**")
+                if detail["status"] == "ERROR":
+                    st.error(detail["error"])
+                else:
+                    st.write(detail["answer"])
+                    st.markdown("**Detected interpretation**")
+                    st.write(detail["interpretation"] or "No interpretation was supplied.")
+                    st.markdown("**Generated SQL**")
+                    st.code(detail["sql"] or "No SQL was supplied.", language="sql")
+                    if detail["result"] is not None and not detail["result"].empty:
+                        st.markdown("**Returned data**")
+                        st.dataframe(format_result(detail["result"]), width="stretch", hide_index=True)
+                st.caption(f"Runtime: {detail['runtime']:.3f} seconds")
+
+    if st.button("Clear Debug Results", icon=":material/delete_sweep:"):
+        st.session_state.pop("debug_summary", None)
+        st.session_state.pop("debug_details", None)
+        st.rerun()
+
+    st.divider()
+    quality_tab, expected_tab, safety_tab, performance_tab = st.tabs([
+        "Data quality", "Expected results", "SQL safety", "Performance",
+    ])
+
+    with quality_tab:
+        st.write("Check all catalog records for identifiers, dates, numeric ranges, structural consistency, and required values.")
+        if st.button("Run data-quality checks", icon=":material/fact_check:", key="run_data_quality"):
+            st.session_state.data_quality_results = data_quality_report()
+        if "data_quality_results" in st.session_state:
+            report = st.session_state.data_quality_results
+            st.metric("Records requiring review", int(report["Records flagged"].sum()))
+            st.dataframe(report, width="stretch", hide_index=True)
+
+    with expected_tab:
+        st.write("Compare key catalog facts and benchmark averages against known correct values.")
+        if st.button("Run expected-result regression", icon=":material/rule:", key="run_expected_results"):
+            st.session_state.expected_result_results = expected_result_report(as_of)
+        if "expected_result_results" in st.session_state:
+            report = st.session_state.expected_result_results
+            st.metric("Checks passed", int((report["Status"] == "Pass").sum()), f"of {len(report)}")
+            st.dataframe(report, width="stretch", hide_index=True)
+
+    with safety_tab:
+        st.write("Audit the SQL generated by the latest question batch for read-only access, report-date scoping, result limits, and local-path exposure.")
+        if st.button("Audit latest generated SQL", icon=":material/security:", key="run_sql_safety"):
+            details = st.session_state.get("debug_details", [])
+            if not details:
+                st.warning("Run one or more Debug Tests first so there is generated SQL to audit.")
+            else:
+                st.session_state.sql_safety_results = sql_safety_report(details, as_of)
+        if "sql_safety_results" in st.session_state:
+            report = st.session_state.sql_safety_results
+            st.metric("Queries passed", int((report["Status"] == "Pass").sum()), f"of {len(report)}")
+            st.dataframe(report, width="stretch", hide_index=True)
+
+    with performance_tab:
+        st.write("Benchmark representative questions twice. Goals: normal questions under 1 second, complex questions under 3 seconds, and identical questions producing identical answers.")
+        if st.button("Run performance benchmark", icon=":material/speed:", key="run_performance"):
+            benchmark_questions = [
+                "Show the 10 licenses expiring in the next 30 days with the highest viewing hours.",
+                "Compare licensed, original, and exclusive content by average cost, audience score, critic score, and viewing hours.",
+                "How many South Korean thriller titles have an audience score of at least 85?",
+            ]
+            rows = []
+            batch_started = time.perf_counter()
+            tracemalloc.start()
+            for question in benchmark_questions:
+                responses = []
+                durations = []
+                row_counts = []
+                for _ in range(2):
+                    started = time.perf_counter()
+                    answer, result, _ = ask_streamvault(question, as_of)
+                    durations.append(time.perf_counter() - started)
+                    responses.append(answer)
+                    row_counts.append(0 if result is None else len(result))
+                rows.append({"Question": question, "Interpretation + query (s)": round(sum(durations) / len(durations), 3), "Returned rows": row_counts[-1], "Identical answers": responses[0] == responses[1], "Goal": "< 3s" if "Compare" in question else "< 1s"})
+            _, peak_memory = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            st.session_state.performance_results = pd.DataFrame(rows)
+            st.session_state.performance_batch_seconds = time.perf_counter() - batch_started
+            st.session_state.performance_peak_memory = peak_memory / (1024 * 1024)
+        if "performance_results" in st.session_state:
+            first, second = st.columns(2)
+            first.metric("Entire benchmark", f"{st.session_state.performance_batch_seconds:.3f}s", "Goal < 30s")
+            second.metric("Peak traced memory", f"{st.session_state.performance_peak_memory:.2f} MB")
+            st.dataframe(st.session_state.performance_results, width="stretch", hide_index=True)
