@@ -15,7 +15,7 @@ The local engine supports:
 - Theme and description searches: “Find titles about friendship or coming of age.”
 - Filters using catalog values such as country, language, genre, rating, studio, type, year, and score threshold.
 
-Every answer is calculated against the catalog CSV included with the app. The app displays the supporting records and the read-only SQL used for the result.
+Every answer is calculated against the catalog CSV included with the app. The app displays the supporting records used for the result.
 
 ## Use the published app
 
@@ -59,9 +59,7 @@ OPENAI_API_KEY = "your-api-key"
 OPENAI_MODEL = "gpt-4.1-mini"
 ```
 
-The planner receives the user question and the field definitions, then returns a single read-only DuckDB `SELECT` query. StreamVault validates that query and executes it locally against the bundled CSV; the catalog data itself is not sent to the model. If the planner is unavailable, the app transparently falls back to the local rule engine.
-
-For exact analyst-authored work, questions can also begin with `SQL:` followed by one safe read-only query against the `catalog` view. The query must include the selected `date_added` report-date constraint.
+The planner receives the user question and the field definitions, then creates a safe internal analysis plan. StreamVault validates and executes that plan locally against the bundled CSV; the catalog data itself is not sent to the model. If the planner is unavailable, the app transparently falls back to the local rule engine. End users only need to ask questions in plain English.
 
 ## Local-only mode
 
