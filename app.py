@@ -2,6 +2,7 @@ from __future__ import annotations
 import time
 import tracemalloc
 from datetime import date, timedelta
+from io import BytesIO
 from pathlib import Path
 import json
 import os
@@ -1023,6 +1024,53 @@ def format_result(df: pd.DataFrame):
             formats[col] = "{:,.1f}"
     return display.style.format(formats, na_rep="—") if formats else display
 
+
+def dataframe_to_xlsx(df: pd.DataFrame, sheet_name: str = "Results") -> bytes:
+    """Create an Excel workbook in memory for a user download."""
+    output = BytesIO()
+    safe_sheet_name = sheet_name[:31]
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+        worksheet = writer.sheets[safe_sheet_name]
+        worksheet.freeze_panes = "A2"
+        for column_cells in worksheet.columns:
+            width = min(max(len(str(cell.value or "")) for cell in column_cells) + 2, 45)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = width
+    return output.getvalue()
+
+
+def dataframe_to_pdf(df: pd.DataFrame, title: str) -> bytes:
+    """Create a legible landscape PDF; use the spreadsheet for complete wide tables."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    output = BytesIO()
+    document = SimpleDocTemplate(output, pagesize=landscape(letter), rightMargin=18, leftMargin=18, topMargin=24, bottomMargin=24)
+    styles = getSampleStyleSheet()
+    preview = df.head(200).iloc[:, :12].copy()
+    def text(value):
+        value = "" if pd.isna(value) else str(value)
+        return Paragraph(value[:80].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), styles["BodyText"])
+    table_data = [[Paragraph(str(column), styles["BodyText"]) for column in preview.columns]]
+    table_data.extend([[text(value) for value in row] for row in preview.itertuples(index=False, name=None)])
+    column_width = (landscape(letter)[0] - 36) / max(len(preview.columns), 1)
+    table = Table(table_data, repeatRows=1, colWidths=[column_width] * len(preview.columns))
+    table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]), ("FONTSIZE", (0, 0), (-1, -1), 7), ("LEADING", (0, 0), (-1, -1), 8)]))
+    note = f"{len(df):,} result rows. PDF includes up to 200 rows and 12 columns; use the spreadsheet for the complete dataset."
+    document.build([Paragraph(title, styles["Title"]), Spacer(1, 0.12 * inch), Paragraph(note, styles["BodyText"]), Spacer(1, 0.12 * inch), table])
+    return output.getvalue()
+
+
+def render_download_options(df: pd.DataFrame, filename_stem: str, title: str, key_prefix: str):
+    """Render CSV, Excel, and PDF download controls for a result table."""
+    with st.container(horizontal=True):
+        st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), f"{filename_stem}.csv", "text/csv", key=f"{key_prefix}_csv")
+        st.download_button("Download spreadsheet", dataframe_to_xlsx(df), f"{filename_stem}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"{key_prefix}_xlsx")
+        st.download_button("Download PDF", dataframe_to_pdf(df, title), f"{filename_stem}.pdf", "application/pdf", key=f"{key_prefix}_pdf")
+
 def render_result_chart(result: pd.DataFrame) -> bool:
     """Render a clear automatic chart when a result has comparable rows."""
     if result is None or result.empty or len(result) < 2:
@@ -1215,7 +1263,7 @@ def show_question_dialog():
                     render_result_chart(result)
                     st.markdown("#### Supporting data")
                     st.dataframe(format_result(result), hide_index=True)
-                    st.download_button("Download these results", result.to_csv(index=False).encode("utf-8"), "streamvault_question_results.csv", "text/csv", key=f"download_{len(st.session_state.messages)}")
+                    render_download_options(result, "streamvault_question_results", "StreamVault question results", f"question_{len(st.session_state.messages)}")
                 elif result is not None and not needs_ranking_follow_up:
                     st.info("No catalog records matched the interpreted question.")
                 st.session_state.messages.append({"role": "assistant", "content": answer, "data": result})
@@ -1278,13 +1326,7 @@ def show_batch_debugger():
         first.metric("Completed", completed)
         second.metric("Needs attention", needs_attention)
         st.dataframe(summary, hide_index=True)
-        st.download_button(
-            "Download batch report",
-            summary.to_csv(index=False).encode("utf-8"),
-            "streamvault_batch_debug_report.csv",
-            "text/csv",
-            key="download_batch_debug_report",
-        )
+        render_download_options(summary, "streamvault_batch_debug_report", "StreamVault batch debug report", "batch_debug_report")
         for index, detail in enumerate(details, start=1):
             with st.expander(f"{index}. {detail['status']}: {detail['question']}"):
                 st.markdown(detail["answer"])
@@ -1391,7 +1433,7 @@ with tabs[4]:
     """, params)
     st.caption(f"Showing {len(explorer):,} records (maximum 1,000).")
     st.dataframe(format_result(explorer), use_container_width=True, hide_index=True)
-    st.download_button("Download filtered results", explorer.to_csv(index=False).encode("utf-8"), "streamvault_filtered_catalog.csv", "text/csv")
+    render_download_options(explorer, "streamvault_filtered_catalog", "StreamVault filtered catalog", "filtered_catalog")
 
 
 # ---------- Batch Debugger ----------
@@ -1459,10 +1501,7 @@ with tabs[5]:
         col4.metric("Average Runtime", f"{average_runtime:.3f}s")
         st.markdown("### Test Summary")
         st.dataframe(summary_df, width="stretch", hide_index=True)
-        st.download_button(
-            "Download Debug Summary", summary_df.to_csv(index=False).encode("utf-8"),
-            "streamvault_debug_summary.csv", "text/csv", width="stretch",
-        )
+        render_download_options(summary_df, "streamvault_debug_summary", "StreamVault debug summary", "debug_summary")
         st.markdown("### Detailed Results")
         for detail in st.session_state.debug_details:
             icon = "✅" if detail["status"] == "OK" else "❌"
