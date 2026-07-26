@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="description"
+        content="StreamVault transforms a 10,000-title content catalog into fast, transparent, data-backed intelligence."
+    >
+
+    <title>StreamVault Content Explorer</title>
+
+    <style>
+        :root {
+            --navy: #081426;
+            --navy-light: #102542;
+            --blue: #2563eb;
+            --blue-hover: #1d4ed8;
+            --purple: #7c3aed;
+            --white: #ffffff;
+            --soft-white: #f8fafc;
+            --muted: #a9b5c7;
+            --card: rgba(255, 255, 255, 0.08);
+            --border: rgba(255, 255, 255, 0.15);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            color: var(--white);
+            background:
+                radial-gradient(
+                    circle at 20% 15%,
+                    rgba(37, 99, 235, 0.30),
+                    transparent 35%
+                ),
+                radial-gradient(
+                    circle at 85% 25%,
+                    rgba(124, 58, 237, 0.25),
+                    transparent 35%
+                ),
+                linear-gradient(
+                    145deg,
+                    var(--navy) 0%,
+                    var(--navy-light) 55%,
+                    #07111f 100%
+                );
+            font-family:
+                Inter,
+                ui-sans-serif,
+                system-ui,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+        }
+
+        a {
+            color: inherit;
+        }
+
+        .page {
+            width: min(1120px, calc(100% - 40px));
+            margin: 0 auto;
+        }
+
+        .navigation {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 24px 0;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+
+        .brand-icon {
+            display: grid;
+            width: 42px;
+            height: 42px;
+            place-items: center;
+            border: 1px solid var(--border);
+            border-radius: 13px;
+            background: var(--card);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .nav-link {
+            color: var(--muted);
+            font-size: 0.95rem;
+            text-decoration: none;
+        }
+
+        .nav-link:hover {
+            color: var(--white);
+        }
+
+        .hero {
+            display: grid;
+            grid-template-columns: 1.25fr 0.75fr;
+            gap: 56px;
+            align-items: center;
+            padding: 80px 0 64px;
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            padding: 8px 13px;
+            border: 1px solid rgba(96, 165, 250, 0.4);
+            border-radius: 999px;
+            color: #bfdbfe;
+            background: rgba(37, 99, 235, 0.12);
+            font-size: 0.82rem;
+            font-weight: 750;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        h1 {
+            max-width: 760px;
+            margin: 22px 0 20px;
+            font-size: clamp(3rem, 7vw, 5.6rem);
+            line-height: 0.98;
+            letter-spacing: -0.065em;
+        }
+
+        .gradient-text {
+            color: transparent;
+            background:
+                linear-gradient(
+                    90deg,
+                    #60a5fa,
+                    #c084fc
+                );
+            background-clip: text;
+            -webkit-background-clip: text;
+        }
+
+        .hero-description {
+            max-width: 680px;
+            margin: 0 0 34px;
+            color: #c9d3e1;
+            font-size: 1.15rem;
+            line-height: 1.75;
+        }
+
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            align-items: center;
+        }
+
+        .primary-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 58px;
+            padding: 0 28px;
+            border-radius: 14px;
+            color: var(--white);
+            background:
+                linear-gradient(
+                    135deg,
+                    var(--blue),
+                    var(--purple)
+                );
+            box-shadow:
+                0 18px 40px rgba(37, 99, 235, 0.35);
+            font-size: 1.05rem;
+            font-weight: 800;
+            text-decoration: none;
+            transition:
+                transform 160ms ease,
+                box-shadow 160ms ease;
+        }
+
+        .primary-button:hover {
+            transform: translateY(-2px);
+            box-shadow:
+                0 22px 48px rgba(37, 99, 235, 0.45);
+        }
+
+        .secondary-link {
+            padding: 16px;
+            color: #cbd5e1;
+            font-weight: 650;
+            text-decoration: none;
+        }
+
+        .secondary-link:hover {
+            color: var(--white);
+        }
+
+        .dashboard-preview {
+            position: relative;
+            padding: 20px;
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            background: var(--card);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.32);
+            backdrop-filter: blur(18px);
+        }
+
+        .preview-header {
+            display: flex;
+            gap: 7px;
+            padding-bottom: 18px;
+        }
+
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .dot-red {
+            background: #fb7185;
+        }
+
+        .dot-yellow {
+            background: #fbbf24;
+        }
+
+        .dot-green {
+            background: #34d399;
+        }
+
+        .preview-label {
+            margin-bottom: 16px;
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+
+        .preview-question {
+            padding: 16px;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.05);
+            line-height: 1.5;
+        }
+
+        .preview-answer {
+            margin-top: 14px;
+            padding: 18px;
+            border-radius: 14px;
+            color: #dbeafe;
+            background: rgba(37, 99, 235, 0.15);
+            line-height: 1.6;
+        }
+
+        .preview-answer strong {
+            color: var(--white);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            padding: 24px 0 72px;
+        }
+
+        .stat {
+            padding: 24px;
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            background: var(--card);
+            text-align: center;
+        }
+
+        .stat-number {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 1.85rem;
+            font-weight: 850;
+        }
+
+        .stat-label {
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .features {
+            padding: 70px 0;
+            border-top: 1px solid var(--border);
+        }
+
+        .section-heading {
+            max-width: 700px;
+            margin: 0 auto 40px;
+            text-align: center;
+        }
+
+        .section-heading h2 {
+            margin: 0 0 14px;
+            font-size: clamp(2rem, 5vw, 3.25rem);
+            letter-spacing: -0.045em;
+        }
+
+        .section-heading p {
+            color: var(--muted);
+            line-height: 1.7;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 18px;
+        }
+
+        .feature-card {
+            padding: 28px;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            background: var(--card);
+        }
+
+        .feature-card h3 {
+            margin: 16px 0 10px;
+        }
+
+        .feature-card p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.65;
+        }
+
+        .feature-icon {
+            font-size: 1.7rem;
+        }
+
+        .final-cta {
+            margin: 36px 0 72px;
+            padding: 54px 30px;
+            border: 1px solid var(--border);
+            border-radius: 26px;
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(37, 99, 235, 0.24),
+                    rgba(124, 58, 237, 0.18)
+                );
+            text-align: center;
+        }
+
+        .final-cta h2 {
+            margin: 0 0 12px;
+            font-size: clamp(2rem, 5vw, 3rem);
+            letter-spacing: -0.04em;
+        }
+
+        .final-cta p {
+            margin: 0 auto 28px;
+            max-width: 620px;
+            color: #c9d3e1;
+            line-height: 1.7;
+        }
+
+        footer {
+            padding: 28px 0 38px;
+            border-top: 1px solid var(--border);
+            color: var(--muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+
+        @media (max-width: 850px) {
+            .hero {
+                grid-template-columns: 1fr;
+                padding-top: 48px;
+            }
+
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .feature-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 520px) {
+            .page {
+                width: min(100% - 26px, 1120px);
+            }
+
+            .navigation {
+                align-items: flex-start;
+            }
+
+            .nav-link {
+                display: none;
+            }
+
+            .stats {
+                grid-template-columns: 1fr;
+            }
+
+            .primary-button,
+            .secondary-link {
+                width: 100%;
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="page">
+        <nav class="navigation">
+            <div class="brand">
+                <span class="brand-icon">🎬</span>
+                <span>StreamVault</span>
+            </div>
+
+            <a
+                class="nav-link"
+                href="#features"
+            >
+                Explore features
+            </a>
+        </nav>
+
+        <main>
+            <section class="hero">
+                <div>
+                    <span class="eyebrow">
+                        Content catalog intelligence
+                    </span>
+
+                    <h1>
+                        Ask your catalog.
+                        <span class="gradient-text">
+                            Get answers.
+                        </span>
+                    </h1>
+
+                    <p class="hero-description">
+                        StreamVault transforms a 10,000-title,
+                        26-field content catalog into fast,
+                        transparent and data-backed intelligence—
+                        without paid AI API calls.
+                    </p>
+
+                    <div class="actions">
+                        <a
+                            class="primary-button"
+                            href="https://streamvaultcontentexplorer-i5oldzorvzbthmzcsgzbte.streamlit.app/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            Launch StreamVault&nbsp; →
+                        </a>
+
+                        <a
+                            class="secondary-link"
+                            href="#features"
+                        >
+                            See what it can do
+                        </a>
+                    </div>
+                </div>
+
+                <aside class="dashboard-preview">
+                    <div class="preview-header">
+                        <span class="dot dot-red"></span>
+                        <span class="dot dot-yellow"></span>
+                        <span class="dot dot-green"></span>
+                    </div>
+
+                    <div class="preview-label">
+                        Ask StreamVault
+                    </div>
+
+                    <div class="preview-question">
+                        Which licenses expire in the next 90 days,
+                        ranked by viewing hours?
+                    </div>
+
+                    <div class="preview-answer">
+                        <strong>Analysis complete.</strong><br>
+                        Review upcoming expirations, supporting
+                        records and the read-only SQL used to
+                        calculate the answer.
+                    </div>
+                </aside>
+            </section>
+
+            <section class="stats" aria-label="Catalog statistics">
+                <article class="stat">
+                    <span class="stat-number">10,000</span>
+                    <span class="stat-label">Catalog titles</span>
+                </article>
+
+                <article class="stat">
+                    <span class="stat-number">26</span>
+                    <span class="stat-label">Catalog fields</span>
+                </article>
+
+                <article class="stat">
+                    <span class="stat-number">14</span>
+                    <span class="stat-label">Countries</span>
+                </article>
+
+                <article class="stat">
+                    <span class="stat-number">$0</span>
+                    <span class="stat-label">API cost per question</span>
+                </article>
+            </section>
+
+            <section class="features" id="features">
+                <div class="section-heading">
+                    <h2>
+                        From manual searching to immediate insight
+                    </h2>
+
+                    <p>
+                        StreamVault helps content coordinators answer
+                        catalog questions without repeatedly filtering
+                        spreadsheets or building reports by hand.
+                    </p>
+                </div>
+
+                <div class="feature-grid">
+                    <article class="feature-card">
+                        <div class="feature-icon">🔎</div>
+                        <h3>Ask detailed questions</h3>
+                        <p>
+                            Explore titles, genres, countries, licensing,
+                            viewing hours, costs, scores and other catalog
+                            dimensions.
+                        </p>
+                    </article>
+
+                    <article class="feature-card">
+                        <div class="feature-icon">📊</div>
+                        <h3>Compare performance</h3>
+                        <p>
+                            Compare movies, television shows, genres,
+                            studios, ratings and acquisition types.
+                        </p>
+                    </article>
+
+                    <article class="feature-card">
+                        <div class="feature-icon">🛡️</div>
+                        <h3>Verify every answer</h3>
+                        <p>
+                            Inspect supporting records, review read-only
+                            SQL and download results for further analysis.
+                        </p>
+                    </article>
+                </div>
+            </section>
+
+            <section class="final-cta">
+                <h2>Explore the catalog in seconds.</h2>
+
+                <p>
+                    Launch the interactive StreamVault dashboard and
+                    ask a question across all 26 content catalog fields.
+                </p>
+
+                <a
+                    class="primary-button"
+                    href="https://streamvaultcontentexplorer-i5oldzorvzbthmzcsgzbte.streamlit.app/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    Launch the Live Dashboard&nbsp; →
+                </a>
+            </section>
+        </main>
+
+        <footer>
+            StreamVault Content Explorer · API-free catalog intelligence
+        </footer>
+    </div>
+</body>
+</html>
