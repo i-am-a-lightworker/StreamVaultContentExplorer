@@ -54,6 +54,13 @@ SCHEMA = {
     "description": "Content description/synopsis (text)",
 }
 
+YOUCATALOG_COLUMNS = [
+    "Content ID", "Title", "Type", "Country", "Original Language", "Release Year", "Rating", "Genre",
+    "Runtime (min)", "Seasons", "Episodes", "Studio", "Production Company", "Acquisition Type",
+    "License Expiration", "Audience Score", "Critic Score", "Viewing Hours", "Completion Rate", "Cost (USD)",
+    "Region Availability", "Keywords", "Awards", "Featured Collection", "Date Added", "Description",
+]
+
 # Built-in QA coverage for the catalog question engine. The Batch Debugger can
 # load and execute this suite without requiring users to write SQL or code.
 DEBUG_QUESTIONS = [
@@ -132,12 +139,45 @@ def get_connection() -> duckdb.DuckDBPyConnection:
 
 
 def query(sql: str, params: list | None = None) -> pd.DataFrame:
-    return get_connection().execute(sql, params or []).df()
+    # `fetchdf()` consistently materializes a DataFrame across local DuckDB
+    # and Streamlit Cloud runtimes; `.df()` may return None with some builds.
+    try:
+        con = st.session_state.get("youcatalog_connection") or get_connection()
+    except Exception:
+        con = get_connection()
+    result = con.execute(sql, params or []).fetchdf()
+    return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
 
 
 def scalar(sql: str, params: list | None = None):
     df = query(sql, params)
-    return df.iloc[0, 0] if not df.empty else None
+    return df.iloc[0, 0] if isinstance(df, pd.DataFrame) and not df.empty else None
+
+
+def validate_user_catalog(df: pd.DataFrame) -> list[str]:
+    return [column for column in YOUCATALOG_COLUMNS if column not in df.columns]
+
+
+def activate_user_catalog(df: pd.DataFrame):
+    """Create an isolated, session-only catalog view from an uploaded template."""
+    con = duckdb.connect()
+    con.register("youcatalog_upload", df)
+    con.execute("""
+        CREATE OR REPLACE VIEW catalog AS
+        SELECT "Content ID" AS content_id, Title AS title, Type AS content_type, Country AS country,
+        "Original Language" AS original_language, TRY_CAST("Release Year" AS INTEGER) AS release_year,
+        Rating AS rating, Genre AS genre, TRY_CAST("Runtime (min)" AS INTEGER) AS runtime_min,
+        TRY_CAST(Seasons AS INTEGER) AS seasons, TRY_CAST(Episodes AS INTEGER) AS episodes, Studio AS studio,
+        "Production Company" AS production_company, "Acquisition Type" AS acquisition_type,
+        TRY_CAST("License Expiration" AS DATE) AS license_expiration, TRY_CAST("Audience Score" AS DOUBLE) AS audience_score,
+        TRY_CAST("Critic Score" AS DOUBLE) AS critic_score, TRY_CAST("Viewing Hours" AS BIGINT) AS viewing_hours,
+        TRY_CAST("Completion Rate" AS DOUBLE) AS completion_rate, TRY_CAST("Cost (USD)" AS DOUBLE) AS cost_usd,
+        "Region Availability" AS region_availability, Keywords AS keywords, Awards AS awards,
+        "Featured Collection" AS featured_collection, TRY_CAST("Date Added" AS DATE) AS date_added, Description AS description
+        FROM youcatalog_upload
+    """)
+    st.session_state.youcatalog_connection = con
+    st.session_state.youcatalog_active = True
 
 
 def to_python_date(value: object) -> date | None:
@@ -1147,6 +1187,7 @@ st.markdown("""
 .sv-title {font-size: 2.35rem; font-weight: 800; letter-spacing: -0.03em;}
 .sv-sub {color: #6b7280; margin-top: -0.5rem; margin-bottom: 1rem;}
 div[data-testid="stMetric"] {border: 1px solid rgba(120,120,120,.22); border-radius: 14px; padding: 14px; background: rgba(127,127,127,.04);}
+div.st-key-youcatalog_launch button {background: #16a34a; border-color: #16a34a; color: white;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1190,6 +1231,8 @@ if metrics["future"]:
 
 st.session_state.setdefault("question_dialog_open", False)
 st.session_state.setdefault("batch_debugger_open", False)
+st.session_state.setdefault("youcatalog_open", False)
+st.session_state.setdefault("youcatalog_active", False)
 
 
 def close_question_dialog():
@@ -1198,6 +1241,38 @@ def close_question_dialog():
 
 def close_batch_debugger():
     st.session_state.batch_debugger_open = False
+
+
+def close_youcatalog():
+    st.session_state.youcatalog_open = False
+
+
+@st.dialog("YouCatalog", width="large", icon=":material/upload_file:", on_dismiss=close_youcatalog)
+def show_youcatalog_dialog():
+    st.write("Upload your own catalog as an Excel or CSV file. Your data stays in this browser session and replaces StreamVault's sample catalog only after validation.")
+    template = pd.DataFrame(columns=YOUCATALOG_COLUMNS)
+    st.download_button("Download blank YouCatalog template", dataframe_to_xlsx(template, "YouCatalog Template"), "youcatalog_blank_template.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption("Required categories: identifiers, title/type, country/language, release and license dates, genre/rating, runtime or episode metadata, studio/acquisition, scores, viewing, completion, cost, availability, and descriptive fields. Use the column names in the template exactly; dates should use YYYY-MM-DD and scores/rates should be 0-100.")
+    upload = st.file_uploader("Upload your completed YouCatalog template", type=["xlsx", "csv"], key="youcatalog_upload")
+    if upload is not None:
+        try:
+            uploaded = pd.read_csv(upload) if upload.name.lower().endswith(".csv") else pd.read_excel(upload)
+            missing = validate_user_catalog(uploaded)
+            if missing:
+                st.error(f"Missing required columns: {', '.join(missing)}")
+            else:
+                st.success(f"Validated {len(uploaded):,} rows and all {len(YOUCATALOG_COLUMNS)} required columns.")
+                st.dataframe(uploaded.head(25), width="stretch", hide_index=True)
+                if st.button("Use my YouCatalog data", type="primary", icon=":material/check_circle:"):
+                    activate_user_catalog(uploaded)
+                    st.session_state.youcatalog_open = False
+                    st.rerun()
+        except Exception as exc:
+            st.error(f"The spreadsheet could not be read: {exc}")
+    if st.session_state.youcatalog_active and st.button("Return to StreamVault sample catalog", icon=":material/restart_alt:"):
+        st.session_state.pop("youcatalog_connection", None)
+        st.session_state.youcatalog_active = False
+        st.rerun()
 
 
 @st.dialog("Ask StreamVault", width="large", icon=":material/auto_awesome:", on_dismiss=close_question_dialog)
@@ -1348,11 +1423,15 @@ tabs = st.tabs([
 ])
 
 with tabs[0]:
-    ask_button, batch_button = st.columns(2)
+    ask_button, batch_button, youcatalog_button = st.columns(3)
     if ask_button.button("Ask StreamVault", type="primary", icon=":material/auto_awesome:"):
         st.session_state.question_dialog_open = True
     if batch_button.button("Open Batch Debugger", icon=":material/fact_check:"):
         st.session_state.batch_debugger_open = True
+    if youcatalog_button.button("YouCatalog", icon=":material/upload_file:", key="youcatalog_launch"):
+        st.session_state.youcatalog_open = True
+    if st.session_state.youcatalog_active:
+        st.success("YouCatalog is active: all analysis uses your uploaded session data.")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Catalog Titles", f"{metrics['total']:,}")
     c2.metric("Movies", f"{metrics['movies']:,}", f"{movie_share:.1f}%")
@@ -1375,6 +1454,8 @@ if st.session_state.question_dialog_open:
     show_question_dialog()
 if st.session_state.batch_debugger_open:
     show_batch_debugger()
+if st.session_state.youcatalog_open:
+    show_youcatalog_dialog()
 
 with tabs[1]:
     st.subheader("Ask StreamVault")
