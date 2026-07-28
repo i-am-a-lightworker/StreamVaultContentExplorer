@@ -19,6 +19,8 @@ import streamlit as st
 
 APP_DIR = Path(__file__).resolve().parent
 CATALOG_PATH = APP_DIR / "data" / "catalog.csv"
+DEFAULT_YOUCATALOG_PATH = APP_DIR / "data" / "netflix_titles_youcatalog_formatted.xlsx"
+DEFAULT_YOUCATALOG_NAME = "Netflix YouCatalog"
 TODAY = date.today()
 MAX_RESULT_ROWS = 500
 
@@ -99,16 +101,16 @@ DEBUG_QUESTIONS = [
 REPORT_TEMPLATES = [
     {"id": "title_count", "label": "Catalog title count", "question": "How many titles are in the catalog?"},
     {"id": "titles_by_genre", "label": "Titles by genre", "question": "How many titles are in each genre?"},
-    {"id": "top_viewed", "label": "Top 10 by viewing hours", "question": "Show the top 10 titles by viewing hours."},
-    {"id": "top_completion", "label": "Top 10 completion rates", "question": "Show the top 10 titles by completion rate."},
-    {"id": "top_audience", "label": "Top 10 audience scores", "question": "Show the top 10 titles by audience score."},
-    {"id": "license_review", "label": "Licenses expiring in 90 days", "question": "Which 20 licenses expire in the next 90 days, ranked by viewing hours?"},
-    {"id": "content_type_comparison", "label": "Movie vs TV performance", "question": "Compare average viewing hours, audience score, and completion rate for movies versus TV shows."},
-    {"id": "genre_efficiency", "label": "Genre value for money", "question": "What genres give us the strongest audience score per dollar spent?"},
+    {"id": "titles_by_country", "label": "Titles by country", "question": "How many titles are in each country?"},
+    {"id": "titles_by_language", "label": "Titles by language", "question": "How many titles are in each language?"},
+    {"id": "titles_by_rating", "label": "Titles by rating", "question": "How many titles are in each rating?"},
+    {"id": "content_type_mix", "label": "Movie vs TV mix", "question": "How many titles are in each content type?"},
+    {"id": "newest_releases", "label": "Newest releases", "question": "Show the top 10 titles by release year."},
+    {"id": "longest_titles", "label": "Longest movies", "question": "Show the top 10 titles by runtime."},
 ]
 
 @st.cache_resource
-def get_connection() -> duckdb.DuckDBPyConnection:
+def get_sample_connection() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
     # DuckDB does not allow prepared parameters in CREATE VIEW statements.
     # Escape the local CSV path before embedding it in this static DDL.
@@ -149,11 +151,44 @@ def get_connection() -> duckdb.DuckDBPyConnection:
     return con
 
 
+def create_youcatalog_view(con: duckdb.DuckDBPyConnection, source_relation: str):
+    """Map a validated YouCatalog sheet into StreamVault's internal schema."""
+    con.execute(f"""
+        CREATE OR REPLACE VIEW catalog AS
+        SELECT "Content ID" AS content_id, Title AS title, Type AS content_type, Country AS country,
+        "Original Language" AS original_language, TRY_CAST("Release Year" AS INTEGER) AS release_year,
+        Rating AS rating, Genre AS genre, TRY_CAST("Runtime (min)" AS INTEGER) AS runtime_min,
+        TRY_CAST(Seasons AS INTEGER) AS seasons, TRY_CAST(Episodes AS INTEGER) AS episodes, Studio AS studio,
+        "Production Company" AS production_company, "Acquisition Type" AS acquisition_type,
+        TRY_CAST("License Expiration" AS DATE) AS license_expiration, TRY_CAST("Audience Score" AS DOUBLE) AS audience_score,
+        TRY_CAST("Critic Score" AS DOUBLE) AS critic_score, TRY_CAST("Viewing Hours" AS BIGINT) AS viewing_hours,
+        TRY_CAST("Completion Rate" AS DOUBLE) AS completion_rate, TRY_CAST("Cost (USD)" AS DOUBLE) AS cost_usd,
+        "Region Availability" AS region_availability, Keywords AS keywords, Awards AS awards,
+        "Featured Collection" AS featured_collection, TRY_CAST("Date Added" AS DATE) AS date_added, Description AS description
+        FROM {source_relation}
+    """)
+
+
+@st.cache_resource
+def get_connection() -> duckdb.DuckDBPyConnection:
+    """Open the bundled YouCatalog workbook, which is StreamVault's default source."""
+    if not DEFAULT_YOUCATALOG_PATH.exists():
+        return get_sample_connection()
+    con = duckdb.connect()
+    default_catalog = pd.read_excel(DEFAULT_YOUCATALOG_PATH)
+    con.register("default_youcatalog", default_catalog)
+    create_youcatalog_view(con, "default_youcatalog")
+    return con
+
+
 def query(sql: str, params: list | None = None) -> pd.DataFrame:
     # `fetchdf()` consistently materializes a DataFrame across local DuckDB
     # and Streamlit Cloud runtimes; `.df()` may return None with some builds.
     try:
-        con = st.session_state.get("youcatalog_connection") or get_connection()
+        if st.session_state.get("catalog_mode", "youcatalog") == "sample":
+            con = get_sample_connection()
+        else:
+            con = st.session_state.get("youcatalog_connection") or get_connection()
     except Exception:
         con = get_connection()
     result = con.execute(sql, params or []).fetchdf()
@@ -173,23 +208,11 @@ def activate_user_catalog(df: pd.DataFrame, source_name: str = "Your uploaded ca
     """Create an isolated, session-only catalog view from an uploaded template."""
     con = duckdb.connect()
     con.register("youcatalog_upload", df)
-    con.execute("""
-        CREATE OR REPLACE VIEW catalog AS
-        SELECT "Content ID" AS content_id, Title AS title, Type AS content_type, Country AS country,
-        "Original Language" AS original_language, TRY_CAST("Release Year" AS INTEGER) AS release_year,
-        Rating AS rating, Genre AS genre, TRY_CAST("Runtime (min)" AS INTEGER) AS runtime_min,
-        TRY_CAST(Seasons AS INTEGER) AS seasons, TRY_CAST(Episodes AS INTEGER) AS episodes, Studio AS studio,
-        "Production Company" AS production_company, "Acquisition Type" AS acquisition_type,
-        TRY_CAST("License Expiration" AS DATE) AS license_expiration, TRY_CAST("Audience Score" AS DOUBLE) AS audience_score,
-        TRY_CAST("Critic Score" AS DOUBLE) AS critic_score, TRY_CAST("Viewing Hours" AS BIGINT) AS viewing_hours,
-        TRY_CAST("Completion Rate" AS DOUBLE) AS completion_rate, TRY_CAST("Cost (USD)" AS DOUBLE) AS cost_usd,
-        "Region Availability" AS region_availability, Keywords AS keywords, Awards AS awards,
-        "Featured Collection" AS featured_collection, TRY_CAST("Date Added" AS DATE) AS date_added, Description AS description
-        FROM youcatalog_upload
-    """)
+    create_youcatalog_view(con, "youcatalog_upload")
     st.session_state.youcatalog_connection = con
     st.session_state.youcatalog_active = True
     st.session_state.youcatalog_name = source_name
+    st.session_state.catalog_mode = "youcatalog"
 
 
 def deactivate_user_catalog():
@@ -199,13 +222,27 @@ def deactivate_user_catalog():
         connection.close()
     st.session_state.youcatalog_active = False
     st.session_state.pop("youcatalog_name", None)
+    st.session_state.catalog_mode = "sample"
+    st.session_state.messages = []
+
+
+def use_default_youcatalog():
+    """Switch from the optional sample catalog back to the bundled YouCatalog."""
+    connection = st.session_state.pop("youcatalog_connection", None)
+    if connection is not None:
+        connection.close()
+    st.session_state.youcatalog_active = True
+    st.session_state.youcatalog_name = DEFAULT_YOUCATALOG_NAME
+    st.session_state.catalog_mode = "youcatalog"
     st.session_state.messages = []
 
 
 def catalog_source_label() -> str:
+    if st.session_state.get("catalog_mode", "youcatalog") == "sample":
+        return "StreamVault sample catalog"
     if st.session_state.get("youcatalog_active"):
         return str(st.session_state.get("youcatalog_name") or "Your YouCatalog data")
-    return "StreamVault sample catalog"
+    return DEFAULT_YOUCATALOG_NAME
 
 
 def to_python_date(value: object) -> date | None:
@@ -546,6 +583,17 @@ def semantic_search(question: str, as_of: date, conditions: list[str], params: l
 def mentioned_catalog_titles(question: str, as_of: date) -> list[str]:
     """Return catalog titles explicitly written in a natural-language question."""
     question_text = " ".join(question.lower().split())
+    # Avoid treating ordinary country/genre wording as a title just because a
+    # catalog title happens to contain the same words. A title must be quoted
+    # or introduced as the subject of a question (for example, "rate for …").
+    has_quoted_title = bool(re.search(r"['\"][^'\"]+['\"]", question))
+    title_metrics = "completion rate|audience score|critic score|viewing hours|cost|runtime|release year|seasons|episodes"
+    has_title_intent = bool(re.search(
+        rf"\b(?:{title_metrics})\s+for\s+(?!movies?\b|tv shows?\b|titles?\b|content\b|each\b|all\b)\S",
+        question_text,
+    ))
+    if not (has_quoted_title or has_title_intent):
+        return []
     titles = query(
         "SELECT DISTINCT title FROM catalog WHERE date_added <= ? AND title IS NOT NULL",
         [as_of],
@@ -553,9 +601,15 @@ def mentioned_catalog_titles(question: str, as_of: date) -> list[str]:
     matches = []
     for title in titles["title"].dropna().astype(str):
         title_text = " ".join(title.lower().split())
-        if title_text and re.search(rf"(?<!\\w){re.escape(title_text)}(?!\\w)", question_text):
+        if title_text and re.search(rf"(?<!\w){re.escape(title_text)}(?!\w)", question_text):
             matches.append(title)
-    return matches
+    if not matches:
+        return []
+    longest_match_length = max(len(" ".join(title.lower().split())) for title in matches)
+    return [
+        title for title in matches
+        if len(" ".join(title.lower().split())) == longest_match_length
+    ]
 
 
 def exact_title_question(question: str, as_of: date, metrics: list[str]) -> tuple[str, pd.DataFrame, dict] | None:
@@ -1269,11 +1323,38 @@ st.markdown('<div class="sv-sub">Interactive intelligence across all 26 content 
 st.session_state.setdefault("question_dialog_open", False)
 st.session_state.setdefault("batch_debugger_open", False)
 st.session_state.setdefault("youcatalog_open", False)
-st.session_state.setdefault("youcatalog_active", False)
+st.session_state.setdefault("youcatalog_active", True)
+st.session_state.setdefault("youcatalog_name", DEFAULT_YOUCATALOG_NAME)
+st.session_state.setdefault("catalog_mode", "youcatalog")
 st.session_state.setdefault("selected_report_template", None)
+st.session_state.setdefault("welcome_choice", None)
+
+if st.session_state.welcome_choice is None:
+    with st.container(border=True):
+        st.subheader("Welcome to StreamVault")
+        st.write("Choose how you would like to begin. You can switch data sources at any time from the sidebar.")
+        st.markdown(
+            "1. Choose **Ready to use StreamVault** to explore the default Netflix YouCatalog.\n"
+            "2. Choose **Practice with sample data** to try the same tools with the built-in `catalog.csv` dataset.\n"
+            "3. Use a ready-made report or ask a question in plain English—no programming or SQL is needed."
+        )
+        ready_column, practice_column = st.columns(2)
+        with ready_column:
+            if st.button("Ready to use StreamVault", type="primary", icon=":material/rocket_launch:", key="welcome_ready", width="stretch"):
+                use_default_youcatalog()
+                st.session_state.welcome_choice = "youcatalog"
+                st.rerun()
+        with practice_column:
+            if st.button("Practice with sample data", icon=":material/school:", key="welcome_practice", width="stretch"):
+                deactivate_user_catalog()
+                st.session_state.welcome_choice = "sample"
+                st.rerun()
 
 with st.sidebar:
     st.header("Analysis settings")
+    if st.button("Choose data source", icon=":material/swap_horiz:", key="reopen_welcome"):
+        st.session_state.welcome_choice = None
+        st.rerun()
     if st.session_state.youcatalog_active:
         st.success(f"Using YouCatalog: {catalog_source_label()}")
         st.caption("This data source remains active until you switch back to the StreamVault sample catalog.")
@@ -1282,6 +1363,9 @@ with st.sidebar:
             st.rerun()
     else:
         st.caption("Using StreamVault sample catalog")
+        if st.button("Use default YouCatalog data", icon=":material/dataset:", key="use_default_youcatalog_sidebar"):
+            use_default_youcatalog()
+            st.rerun()
     st.divider()
     max_date = to_python_date(scalar("SELECT MAX(date_added) FROM catalog"))
     min_date = to_python_date(scalar("SELECT MIN(date_added) FROM catalog"))
@@ -1330,7 +1414,7 @@ def close_youcatalog():
 
 @st.dialog("YouCatalog", width="large", icon=":material/upload_file:", on_dismiss=close_youcatalog)
 def show_youcatalog_dialog():
-    st.write("Upload your own catalog as an Excel or CSV file. Once activated, YouCatalog stays in use for all reports and questions until you choose to return to the StreamVault sample catalog.")
+    st.write(f"**{DEFAULT_YOUCATALOG_NAME}** is StreamVault's startup data source. Upload a replacement Excel or CSV catalog whenever you want; the selected YouCatalog stays in use for all reports and questions until you choose the sample catalog.")
     template = pd.DataFrame(columns=YOUCATALOG_COLUMNS)
     st.download_button("Download blank YouCatalog template", dataframe_to_xlsx(template, "YouCatalog Template"), "youcatalog_blank_template.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.caption("Required categories: identifiers, title/type, country/language, release and license dates, genre/rating, runtime or episode metadata, studio/acquisition, scores, viewing, completion, cost, availability, and descriptive fields. Use the column names in the template exactly; dates should use YYYY-MM-DD and scores/rates should be 0-100.")
@@ -1352,6 +1436,9 @@ def show_youcatalog_dialog():
             st.error(f"The spreadsheet could not be read: {exc}")
     if st.session_state.youcatalog_active and st.button("Stop using YouCatalog and use sample catalog", icon=":material/restart_alt:"):
         deactivate_user_catalog()
+        st.rerun()
+    elif st.session_state.catalog_mode == "sample" and st.button("Use default YouCatalog data", icon=":material/dataset:"):
+        use_default_youcatalog()
         st.rerun()
 
 

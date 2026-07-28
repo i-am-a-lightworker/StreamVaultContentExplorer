@@ -15,6 +15,12 @@ class DataQualityTests(unittest.TestCase):
         )
         self.assertGreaterEqual(int(result.iloc[0]["records"]), 0)
 
+    def test_bundled_youcatalog_is_the_default_source(self):
+        self.assertTrue(self.app["DEFAULT_YOUCATALOG_PATH"].is_file())
+        self.assertEqual(self.app["DEFAULT_YOUCATALOG_NAME"], "Netflix YouCatalog")
+        total = self.app["scalar"]("SELECT COUNT(*) FROM catalog")
+        self.assertEqual(total, 8807)
+
     def test_report_date_excludes_future_records(self):
         report_date = date(2026, 7, 25)
         included = self.app["scalar"]("SELECT COUNT(*) FROM catalog WHERE date_added <= ?", [report_date])
