@@ -96,6 +96,17 @@ DEBUG_QUESTIONS = [
     {"id": 36, "category": "Column comparison", "question": "Find records with a license expiration date earlier than the date the title was added.", "expected": "Compare License Expiration directly with Date Added."},
 ]
 
+REPORT_TEMPLATES = [
+    {"id": "title_count", "label": "Catalog title count", "question": "How many titles are in the catalog?"},
+    {"id": "titles_by_genre", "label": "Titles by genre", "question": "How many titles are in each genre?"},
+    {"id": "top_viewed", "label": "Top 10 by viewing hours", "question": "Show the top 10 titles by viewing hours."},
+    {"id": "top_completion", "label": "Top 10 completion rates", "question": "Show the top 10 titles by completion rate."},
+    {"id": "top_audience", "label": "Top 10 audience scores", "question": "Show the top 10 titles by audience score."},
+    {"id": "license_review", "label": "Licenses expiring in 90 days", "question": "Which 20 licenses expire in the next 90 days, ranked by viewing hours?"},
+    {"id": "content_type_comparison", "label": "Movie vs TV performance", "question": "Compare average viewing hours, audience score, and completion rate for movies versus TV shows."},
+    {"id": "genre_efficiency", "label": "Genre value for money", "question": "What genres give us the strongest audience score per dollar spent?"},
+]
+
 @st.cache_resource
 def get_connection() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
@@ -158,7 +169,7 @@ def validate_user_catalog(df: pd.DataFrame) -> list[str]:
     return [column for column in YOUCATALOG_COLUMNS if column not in df.columns]
 
 
-def activate_user_catalog(df: pd.DataFrame):
+def activate_user_catalog(df: pd.DataFrame, source_name: str = "Your uploaded catalog"):
     """Create an isolated, session-only catalog view from an uploaded template."""
     con = duckdb.connect()
     con.register("youcatalog_upload", df)
@@ -178,6 +189,23 @@ def activate_user_catalog(df: pd.DataFrame):
     """)
     st.session_state.youcatalog_connection = con
     st.session_state.youcatalog_active = True
+    st.session_state.youcatalog_name = source_name
+
+
+def deactivate_user_catalog():
+    """Return this browser session to StreamVault's bundled sample catalog."""
+    connection = st.session_state.pop("youcatalog_connection", None)
+    if connection is not None:
+        connection.close()
+    st.session_state.youcatalog_active = False
+    st.session_state.pop("youcatalog_name", None)
+    st.session_state.messages = []
+
+
+def catalog_source_label() -> str:
+    if st.session_state.get("youcatalog_active"):
+        return str(st.session_state.get("youcatalog_name") or "Your YouCatalog data")
+    return "StreamVault sample catalog"
 
 
 def to_python_date(value: object) -> date | None:
@@ -515,6 +543,43 @@ def semantic_search(question: str, as_of: date, conditions: list[str], params: l
     return answer, result, {"interpretation": "Local keyword-based semantic search across catalog text fields", "sql": sql}
 
 
+def mentioned_catalog_titles(question: str, as_of: date) -> list[str]:
+    """Return catalog titles explicitly written in a natural-language question."""
+    question_text = " ".join(question.lower().split())
+    titles = query(
+        "SELECT DISTINCT title FROM catalog WHERE date_added <= ? AND title IS NOT NULL",
+        [as_of],
+    )
+    matches = []
+    for title in titles["title"].dropna().astype(str):
+        title_text = " ".join(title.lower().split())
+        if title_text and re.search(rf"(?<!\\w){re.escape(title_text)}(?!\\w)", question_text):
+            matches.append(title)
+    return matches
+
+
+def exact_title_question(question: str, as_of: date, metrics: list[str]) -> tuple[str, pd.DataFrame, dict] | None:
+    """Answer a requested metric for an explicitly named catalog title."""
+    titles = mentioned_catalog_titles(question, as_of)
+    if not titles:
+        return None
+
+    columns = ['title AS "Title"']
+    for metric in metrics:
+        columns.append(f'{metric} AS "{LABELS[metric]}"')
+    placeholders = ", ".join("?" for _ in titles)
+    sql = f"""
+        SELECT {', '.join(columns)}
+        FROM catalog
+        WHERE date_added <= ? AND lower(title) IN ({placeholders})
+        ORDER BY title
+    """
+    result = query(sql, [as_of, *[title.lower() for title in titles]])
+    requested = ", ".join(LABELS[metric].lower() for metric in metrics) if metrics else "catalog record"
+    answer = make_answer(f"{requested.capitalize()} for the named title", result, [])
+    return answer, result, {"interpretation": "Exact catalog title match", "sql": sql}
+
+
 def balanced_multi_genre_titles(where: str, params: list[Any], limit: int, sort_column: str = "viewing_hours", direction: str = "DESC") -> tuple[pd.DataFrame, str]:
     """Return one requested total, alternating fairly between named genres."""
     sql = f"""
@@ -651,6 +716,9 @@ def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame
     where = " AND ".join(conditions)
     metrics = detect_metrics(question)
     dimension = detect_dimension(question)
+    named_title_answer = exact_title_question(question, as_of, metrics)
+    if named_title_answer:
+        return named_title_answer
     if requires_ranking_follow_up(question, as_of):
         answer = (
             "**Quick clarification:** What should **top** mean for this comparison? "
@@ -869,6 +937,10 @@ def ask_streamvault(question: str, as_of: date):
     # A configured planner handles compound, natural-language requests across
     # every catalog field. The deterministic engine remains a private fallback.
     planner_note = ""
+    if mentioned_catalog_titles(question, as_of):
+        # Exact title questions should never be diluted by broad text matching
+        # or delegated to the optional planner.
+        return local_question_engine(question, as_of)
     named_genres = selected_genres(question, as_of)
     acquisition_terms = ("licensed", "original", "exclusive")
     if sum(term in question.lower() for term in acquisition_terms) >= 2 and any(word in question.lower() for word in ["compare", "average", "avg", "mean"]):
@@ -1194,8 +1266,23 @@ div.st-key-youcatalog_launch button {background: #16a34a; border-color: #16a34a;
 st.markdown('<div class="sv-title">🎬 StreamVault</div>', unsafe_allow_html=True)
 st.markdown('<div class="sv-sub">Interactive intelligence across all 26 content catalog fields</div>', unsafe_allow_html=True)
 
+st.session_state.setdefault("question_dialog_open", False)
+st.session_state.setdefault("batch_debugger_open", False)
+st.session_state.setdefault("youcatalog_open", False)
+st.session_state.setdefault("youcatalog_active", False)
+st.session_state.setdefault("selected_report_template", None)
+
 with st.sidebar:
     st.header("Analysis settings")
+    if st.session_state.youcatalog_active:
+        st.success(f"Using YouCatalog: {catalog_source_label()}")
+        st.caption("This data source remains active until you switch back to the StreamVault sample catalog.")
+        if st.button("Stop using YouCatalog data", icon=":material/restart_alt:", key="stop_youcatalog_sidebar"):
+            deactivate_user_catalog()
+            st.rerun()
+    else:
+        st.caption("Using StreamVault sample catalog")
+    st.divider()
     max_date = to_python_date(scalar("SELECT MAX(date_added) FROM catalog"))
     min_date = to_python_date(scalar("SELECT MIN(date_added) FROM catalog"))
     default_as_of = min(TODAY, max_date) if max_date else TODAY
@@ -1229,12 +1316,6 @@ doc_prev_share = pct(metrics["doc_previous"], metrics["previous"])
 if metrics["future"]:
     st.warning(f"Data quality: {metrics['future']} catalog records are dated after {as_of:%B %d, %Y} and are excluded from current metrics.")
 
-st.session_state.setdefault("question_dialog_open", False)
-st.session_state.setdefault("batch_debugger_open", False)
-st.session_state.setdefault("youcatalog_open", False)
-st.session_state.setdefault("youcatalog_active", False)
-
-
 def close_question_dialog():
     st.session_state.question_dialog_open = False
 
@@ -1249,7 +1330,7 @@ def close_youcatalog():
 
 @st.dialog("YouCatalog", width="large", icon=":material/upload_file:", on_dismiss=close_youcatalog)
 def show_youcatalog_dialog():
-    st.write("Upload your own catalog as an Excel or CSV file. Your data stays in this browser session and replaces StreamVault's sample catalog only after validation.")
+    st.write("Upload your own catalog as an Excel or CSV file. Once activated, YouCatalog stays in use for all reports and questions until you choose to return to the StreamVault sample catalog.")
     template = pd.DataFrame(columns=YOUCATALOG_COLUMNS)
     st.download_button("Download blank YouCatalog template", dataframe_to_xlsx(template, "YouCatalog Template"), "youcatalog_blank_template.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.caption("Required categories: identifiers, title/type, country/language, release and license dates, genre/rating, runtime or episode metadata, studio/acquisition, scores, viewing, completion, cost, availability, and descriptive fields. Use the column names in the template exactly; dates should use YYYY-MM-DD and scores/rates should be 0-100.")
@@ -1264,14 +1345,13 @@ def show_youcatalog_dialog():
                 st.success(f"Validated {len(uploaded):,} rows and all {len(YOUCATALOG_COLUMNS)} required columns.")
                 st.dataframe(uploaded.head(25), width="stretch", hide_index=True)
                 if st.button("Use my YouCatalog data", type="primary", icon=":material/check_circle:"):
-                    activate_user_catalog(uploaded)
+                    activate_user_catalog(uploaded, upload.name)
                     st.session_state.youcatalog_open = False
                     st.rerun()
         except Exception as exc:
             st.error(f"The spreadsheet could not be read: {exc}")
-    if st.session_state.youcatalog_active and st.button("Return to StreamVault sample catalog", icon=":material/restart_alt:"):
-        st.session_state.pop("youcatalog_connection", None)
-        st.session_state.youcatalog_active = False
+    if st.session_state.youcatalog_active and st.button("Stop using YouCatalog and use sample catalog", icon=":material/restart_alt:"):
+        deactivate_user_catalog()
         st.rerun()
 
 
@@ -1431,7 +1511,36 @@ with tabs[0]:
     if youcatalog_button.button("YouCatalog", icon=":material/upload_file:", key="youcatalog_launch"):
         st.session_state.youcatalog_open = True
     if st.session_state.youcatalog_active:
-        st.success("YouCatalog is active: all analysis uses your uploaded session data.")
+        st.success(f"YouCatalog is active: all analysis uses **{catalog_source_label()}** until you choose to stop using YouCatalog data.")
+    st.subheader("Ready-made reports")
+    st.caption(f"Run one of the eight most-used reports immediately using **{catalog_source_label()}** — no question assistant needed.")
+    template_columns = st.columns(2)
+    for index, template in enumerate(REPORT_TEMPLATES):
+        with template_columns[index % 2]:
+            if st.button(template["label"], icon=":material/description:", key=f"report_template_{template['id']}", width="stretch"):
+                st.session_state.selected_report_template = template["id"]
+
+    selected_template = next(
+        (item for item in REPORT_TEMPLATES if item["id"] == st.session_state.selected_report_template),
+        None,
+    )
+    if selected_template:
+        with st.container(border=True):
+            report_title, close_report = st.container(horizontal=True), None
+            report_title.subheader(selected_template["label"])
+            if report_title.button("Close report", icon=":material/close:", key="close_template_report"):
+                st.session_state.selected_report_template = None
+                st.rerun()
+            st.caption(f"Source: {catalog_source_label()}")
+            with st.spinner("Preparing report..."):
+                answer, result, _ = ask_streamvault(selected_template["question"], as_of)
+            st.markdown(answer)
+            if result is not None and not result.empty:
+                render_result_chart(result)
+                st.dataframe(format_result(result), hide_index=True)
+                render_download_options(result, f"streamvault_{selected_template['id']}", selected_template["label"], f"template_{selected_template['id']}")
+            elif result is not None:
+                st.info("No catalog records matched this report for the selected date.")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Catalog Titles", f"{metrics['total']:,}")
     c2.metric("Movies", f"{metrics['movies']:,}", f"{movie_share:.1f}%")

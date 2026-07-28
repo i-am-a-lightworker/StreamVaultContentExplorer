@@ -31,3 +31,18 @@ class QuestionEngineTests(unittest.TestCase):
         )
         self.assertEqual(set(result["Acquisition Type"]), {"Licensed", "Original", "Exclusive"})
         self.assertEqual(len(result), 3)
+
+    def test_completion_rate_for_named_title_returns_only_that_title(self):
+        title = self.app["query"](
+            "SELECT title FROM catalog WHERE date_added <= ? ORDER BY title LIMIT 1",
+            [REPORT_DATE],
+        ).iloc[0, 0]
+        answer, result, plan = self.app["ask_streamvault"](
+            f"What's the completion rate for {title}?",
+            REPORT_DATE,
+        )
+        self.assertEqual(plan["interpretation"], "Exact catalog title match")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["Title"], title)
+        self.assertIn("Completion Rate", result.columns)
+        self.assertNotIn("semantic search", answer.lower())

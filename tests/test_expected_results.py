@@ -24,3 +24,8 @@ class ExpectedResultsTests(unittest.TestCase):
         self.assertEqual(len(suite), 30)
         self.assertEqual(suite[0]["id"], 8)
         self.assertEqual(suite[-1]["id"], 36)
+
+    def test_ready_made_report_templates_include_eight_reports(self):
+        templates = self.app["REPORT_TEMPLATES"]
+        self.assertEqual(len(templates), 8)
+        self.assertEqual(len({template["id"] for template in templates}), 8)
