@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import time
 import tracemalloc
 from datetime import date, timedelta
@@ -24,7 +24,7 @@ DEFAULT_YOUCATALOG_NAME = "Netflix YouCatalog"
 TODAY = date.today()
 MAX_RESULT_ROWS = 500
 
-st.set_page_config(page_title="StreamVault", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="StreamVault", page_icon="ðŸŽ¬", layout="wide")
 
 # The 26 catalog fields available to the assistant.
 SCHEMA = {
@@ -62,6 +62,7 @@ YOUCATALOG_COLUMNS = [
     "License Expiration", "Audience Score", "Critic Score", "Viewing Hours", "Completion Rate", "Cost (USD)",
     "Region Availability", "Keywords", "Awards", "Featured Collection", "Date Added", "Description",
 ]
+MULTI_VALUE_COLUMNS = {"country", "genre"}
 
 # Built-in QA coverage for the catalog question engine. The Batch Debugger can
 # load and execute this suite without requiring users to write SQL or code.
@@ -155,9 +156,20 @@ def create_youcatalog_view(con: duckdb.DuckDBPyConnection, source_relation: str)
     """Map a validated YouCatalog sheet into StreamVault's internal schema."""
     con.execute(f"""
         CREATE OR REPLACE VIEW catalog AS
-        SELECT "Content ID" AS content_id, Title AS title, Type AS content_type, Country AS country,
+        SELECT "Content ID" AS content_id, Title AS title, Type AS content_type,
+        COALESCE(NULLIF(trim(CAST(Country AS VARCHAR)), ''), 'Unknown') AS country,
         "Original Language" AS original_language, TRY_CAST("Release Year" AS INTEGER) AS release_year,
-        Rating AS rating, Genre AS genre, TRY_CAST("Runtime (min)" AS INTEGER) AS runtime_min,
+        CASE
+            WHEN Rating IS NULL OR trim(CAST(Rating AS VARCHAR)) = ''
+                OR regexp_matches(lower(trim(CAST(Rating AS VARCHAR))), '^[0-9]+\\s*min$')
+            THEN 'Unrated'
+            ELSE trim(CAST(Rating AS VARCHAR))
+        END AS rating,
+        COALESCE(NULLIF(trim(CAST(Genre AS VARCHAR)), ''), 'Unknown') AS genre,
+        COALESCE(
+            TRY_CAST("Runtime (min)" AS INTEGER),
+            TRY_CAST(regexp_extract(CAST(Rating AS VARCHAR), '([0-9]+)', 1) AS INTEGER)
+        ) AS runtime_min,
         TRY_CAST(Seasons AS INTEGER) AS seasons, TRY_CAST(Episodes AS INTEGER) AS episodes, Studio AS studio,
         "Production Company" AS production_company, "Acquisition Type" AS acquisition_type,
         TRY_CAST("License Expiration" AS DATE) AS license_expiration, TRY_CAST("Audience Score" AS DOUBLE) AS audience_score,
@@ -393,7 +405,20 @@ def requires_ranking_follow_up(question: str, as_of: date) -> bool:
 
 def known_values(column: str, as_of: date) -> list[str]:
     df = query(f"SELECT DISTINCT {column} AS value FROM catalog WHERE date_added <= ? AND {column} IS NOT NULL ORDER BY value", [as_of])
-    return [str(v) for v in df["value"].tolist() if str(v).strip()]
+    values = [str(v).strip() for v in df["value"].tolist() if str(v).strip()]
+    if column not in MULTI_VALUE_COLUMNS:
+        return values
+    return sorted({part.strip() for value in values for part in value.split(",") if part.strip()})
+
+
+def multi_value_condition(column: str) -> str:
+    """Match one comma-separated catalog token without partial-value matches."""
+    return rf"regexp_matches(lower({column}), '(^|,\\s*)' || ? || '(\\s*,|$)')"
+
+
+def catalog_column_has_values(column: str, as_of: date) -> bool:
+    """Tell the question engine whether the active source supports a field."""
+    return bool(scalar(f"SELECT COUNT(*) FROM catalog WHERE date_added <= ? AND {column} IS NOT NULL", [as_of]))
 
 
 def genre_is_mentioned(genre: str, question: str) -> bool:
@@ -454,12 +479,11 @@ def value_filter(question: str, as_of: date) -> tuple[list[str], list[Any], list
         notes.append("TV shows")
 
     # A question may name several genres, such as "Action, Comedy and Drama".
-    # Use one IN filter so all requested genre categories are included.
+    # The source can store multiple comma-separated categories on each title.
     genre_values = known_values("genre", as_of)
     genre_matches = [v for v in genre_values if len(v) >= 3 and genre_is_mentioned(v, q)]
     if genre_matches:
-        placeholders = ", ".join("?" for _ in genre_matches)
-        conditions.append(f"lower(genre) IN ({placeholders})")
+        conditions.append("(" + " OR ".join(multi_value_condition("genre") for _ in genre_matches) + ")")
         params.extend(v.lower() for v in genre_matches)
         if len(genre_matches) == 1:
             notes.append(f"Genre = {genre_matches[0]}")
@@ -470,8 +494,11 @@ def value_filter(question: str, as_of: date) -> tuple[list[str], list[Any], list
         values = known_values(column, as_of)
         matches = [v for v in values if len(v) >= 3 and catalog_value_is_mentioned(column, v, q)]
         if matches:
-            placeholders = ", ".join("?" for _ in matches)
-            conditions.append(f"lower({column}) IN ({placeholders})")
+            if column in MULTI_VALUE_COLUMNS:
+                conditions.append("(" + " OR ".join(multi_value_condition(column) for _ in matches) + ")")
+            else:
+                placeholders = ", ".join("?" for _ in matches)
+                conditions.append(f"lower({column}) IN ({placeholders})")
             params.extend(value.lower() for value in matches)
             if len(matches) == 1:
                 notes.append(f"{LABELS[column]} = {matches[0]}")
@@ -527,7 +554,7 @@ def make_answer(title: str, result: pd.DataFrame, notes: list[str], metric: str 
                 pieces.append(f"**{col}:** {value:,.1f}" if isinstance(value, float) else f"**{col}:** {value:,}")
             else:
                 pieces.append(f"**{col}:** {value}")
-        return f"**{title}.** " + " · ".join(pieces) + filter_text
+        return f"**{title}.** " + " Â· ".join(pieces) + filter_text
 
     lead = f"**{title}.** StreamVault found **{len(result):,} result rows**"
     if metric and metric in result.columns:
@@ -585,7 +612,7 @@ def mentioned_catalog_titles(question: str, as_of: date) -> list[str]:
     question_text = " ".join(question.lower().split())
     # Avoid treating ordinary country/genre wording as a title just because a
     # catalog title happens to contain the same words. A title must be quoted
-    # or introduced as the subject of a question (for example, "rate for …").
+    # or introduced as the subject of a question (for example, "rate for â€¦").
     has_quoted_title = bool(re.search(r"['\"][^'\"]+['\"]", question))
     title_metrics = "completion rate|audience score|critic score|viewing hours|cost|runtime|release year|seasons|episodes"
     has_title_intent = bool(re.search(
@@ -770,6 +797,17 @@ def local_question_engine(question: str, as_of: date) -> tuple[str, pd.DataFrame
     where = " AND ".join(conditions)
     metrics = detect_metrics(question)
     dimension = detect_dimension(question)
+    unavailable_metrics = [metric for metric in metrics if not catalog_column_has_values(metric, as_of)]
+    if unavailable_metrics:
+        labels = ", ".join(LABELS[metric] for metric in unavailable_metrics)
+        answer = (
+            f"**{catalog_source_label()} does not include populated {labels} data.** "
+            "Choose a report that uses the available catalog fields, upload a fuller YouCatalog, or switch to the sample data to practice that analysis."
+        )
+        return answer, pd.DataFrame(), {
+            "interpretation": f"Requested field unavailable in the active data source: {labels}",
+            "sql": "",
+        }
     named_title_answer = exact_title_question(question, as_of, metrics)
     if named_title_answer:
         return named_title_answer
@@ -1047,7 +1085,7 @@ def parse_batch_questions(text: str, maximum: int = 40) -> list[str]:
     """Turn one-question-per-line input into a bounded batch of prompts."""
     questions = []
     for line in text.splitlines():
-        question = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        question = re.sub(r"^\s*(?:[-*â€¢]|\d+[.)])\s*", "", line).strip()
         if question:
             questions.append(question)
     return questions[:maximum]
@@ -1104,8 +1142,8 @@ def data_quality_report() -> pd.DataFrame:
         ("Duplicate titles", "SELECT COUNT(*) FROM (SELECT title FROM catalog GROUP BY title HAVING COUNT(*) > 1)"),
         ("Invalid dates", "SELECT COUNT(*) FROM catalog WHERE date_added IS NULL OR license_expiration IS NULL"),
         ("License before Date Added", "SELECT COUNT(*) FROM catalog WHERE license_expiration < date_added"),
-        ("Scores outside 0–100", "SELECT COUNT(*) FROM catalog WHERE audience_score NOT BETWEEN 0 AND 100 OR critic_score NOT BETWEEN 0 AND 100"),
-        ("Completion rates outside 0–100", "SELECT COUNT(*) FROM catalog WHERE completion_rate NOT BETWEEN 0 AND 100"),
+        ("Scores outside 0â€“100", "SELECT COUNT(*) FROM catalog WHERE audience_score NOT BETWEEN 0 AND 100 OR critic_score NOT BETWEEN 0 AND 100"),
+        ("Completion rates outside 0â€“100", "SELECT COUNT(*) FROM catalog WHERE completion_rate NOT BETWEEN 0 AND 100"),
         ("Negative cost or viewing hours", "SELECT COUNT(*) FROM catalog WHERE cost_usd < 0 OR viewing_hours < 0"),
         ("Movies with seasons or episodes", "SELECT COUNT(*) FROM catalog WHERE content_type = 'Movie' AND (seasons IS NOT NULL OR episodes IS NOT NULL)"),
         ("TV shows missing seasons or episodes", "SELECT COUNT(*) FROM catalog WHERE content_type = 'TV Show' AND (seasons IS NULL OR episodes IS NULL)"),
@@ -1149,6 +1187,9 @@ def sql_safety_report(details: list[dict], as_of: date) -> pd.DataFrame:
 
 def format_result(df: pd.DataFrame):
     display = df.copy()
+    # The Netflix starter workbook intentionally leaves several optional
+    # analytics columns blank. Do not render wide, all-empty explorer columns.
+    display = display.dropna(axis=1, how="all")
     formats = {}
     for col in display.columns:
         name = str(col).lower()
@@ -1188,7 +1229,7 @@ def format_result(df: pd.DataFrame):
             formats[col] = "{:,.0f}"
         elif "score" in name or "average" in name or "avg" in name:
             formats[col] = "{:,.1f}"
-    return display.style.format(formats, na_rep="—") if formats else display
+    return display.style.format(formats, na_rep="â€”") if formats else display
 
 
 def dataframe_to_xlsx(df: pd.DataFrame, sheet_name: str = "Results") -> bytes:
@@ -1317,7 +1358,7 @@ div.st-key-youcatalog_launch button {background: #16a34a; border-color: #16a34a;
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="sv-title">🎬 StreamVault</div>', unsafe_allow_html=True)
+st.markdown('<div class="sv-title">ðŸŽ¬ StreamVault</div>', unsafe_allow_html=True)
 st.markdown('<div class="sv-sub">Interactive intelligence across all 26 content catalog fields</div>', unsafe_allow_html=True)
 
 st.session_state.setdefault("question_dialog_open", False)
@@ -1336,7 +1377,7 @@ if st.session_state.welcome_choice is None:
         st.markdown(
             "1. Choose **Ready to use StreamVault** to explore the default Netflix YouCatalog.\n"
             "2. Choose **Practice with sample data** to try the same tools with the built-in `catalog.csv` dataset.\n"
-            "3. Use a ready-made report or ask a question in plain English—no programming or SQL is needed."
+            "3. Use a ready-made report or ask a question in plain Englishâ€”no programming or SQL is needed."
         )
         ready_column, practice_column = st.columns(2)
         with ready_column:
@@ -1600,7 +1641,7 @@ with tabs[0]:
     if st.session_state.youcatalog_active:
         st.success(f"YouCatalog is active: all analysis uses **{catalog_source_label()}** until you choose to stop using YouCatalog data.")
     st.subheader("Ready-made reports")
-    st.caption(f"Run one of the eight most-used reports immediately using **{catalog_source_label()}** — no question assistant needed.")
+    st.caption(f"Run one of the eight most-used reports immediately using **{catalog_source_label()}** â€” no question assistant needed.")
     template_columns = st.columns(2)
     for index, template in enumerate(REPORT_TEMPLATES):
         with template_columns[index % 2]:
@@ -1641,10 +1682,10 @@ with tabs[0]:
     left, right = st.columns(2)
     with left:
         type_df = query('SELECT content_type AS "Type", COUNT(*) AS "Titles" FROM catalog WHERE date_added <= ? GROUP BY content_type', [as_of])
-        st.plotly_chart(px.pie(type_df, names="Type", values="Titles", hole=.58, title="Movie vs TV Mix"), use_container_width=True)
+        st.plotly_chart(px.pie(type_df, names="Type", values="Titles", hole=.58, title="Movie vs TV Mix"), width="stretch")
     with right:
         genre_df = query('SELECT genre AS "Genre", COUNT(*) AS "Titles" FROM catalog WHERE date_added <= ? GROUP BY genre ORDER BY "Titles" DESC LIMIT 10', [as_of])
-        st.plotly_chart(px.bar(genre_df.sort_values("Titles"), x="Titles", y="Genre", orientation="h", title="Top Genres"), use_container_width=True)
+        st.plotly_chart(px.bar(genre_df.sort_values("Titles"), x="Titles", y="Genre", orientation="h", title="Top Genres"), width="stretch")
 
 if st.session_state.question_dialog_open:
     show_question_dialog()
@@ -1663,12 +1704,12 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Catalog data dictionary")
     dictionary = pd.DataFrame([{"Field": k, "Meaning": v} for k, v in SCHEMA.items()])
-    st.dataframe(dictionary, use_container_width=True, hide_index=True)
+    st.dataframe(dictionary, width="stretch", hide_index=True)
     st.caption("All 26 fields are available to the local question engine and the catalog explorer.")
 
 with tabs[3]:
     monthly = query("SELECT date_trunc('month', date_added) AS month, COUNT(*) AS titles_added FROM catalog WHERE date_added <= ? GROUP BY month ORDER BY month", [as_of])
-    st.plotly_chart(px.line(monthly, x="month", y="titles_added", markers=True, title="Titles Added by Month"), use_container_width=True)
+    st.plotly_chart(px.line(monthly, x="month", y="titles_added", markers=True, title="Titles Added by Month"), width="stretch")
     quarterly = query("""
         SELECT date_trunc('quarter', date_added) AS quarter, COUNT(*) AS total_additions,
         COUNT(*) FILTER (WHERE lower(country) <> 'united states') AS international,
@@ -1680,19 +1721,21 @@ with tabs[3]:
     trend = quarterly.melt(id_vars=["quarter"], value_vars=["International Share", "Documentary Share"], var_name="Metric", value_name="Share")
     fig = px.line(trend, x="quarter", y="Share", color="Metric", markers=True, title="Quarterly Content Mix")
     fig.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 with tabs[4]:
     f1, f2, f3, f4 = st.columns(4)
-    countries = ["All"] + query("SELECT DISTINCT country FROM catalog ORDER BY country")["country"].tolist()
-    genres = ["All"] + query("SELECT DISTINCT genre FROM catalog ORDER BY genre")["genre"].tolist()
+    countries = ["All"] + known_values("country", as_of)
+    genres = ["All"] + known_values("genre", as_of)
     country = f1.selectbox("Country", countries)
     genre = f2.selectbox("Genre", genres)
     content_type = f3.selectbox("Type", ["All", "Movie", "TV Show"])
     search = f4.text_input("Search title, keywords, or description")
-    conditions, params = ["date_added <= ?"], [as_of]
-    if country != "All": conditions.append("country = ?"); params.append(country)
-    if genre != "All": conditions.append("genre = ?"); params.append(genre)
+    # Keep rows with no Date Added visible at the bottom of the explorer so
+    # users can identify and correct them instead of losing them silently.
+    conditions, params = ["(date_added <= ? OR date_added IS NULL)"], [as_of]
+    if country != "All": conditions.append(multi_value_condition("country")); params.append(country.lower())
+    if genre != "All": conditions.append(multi_value_condition("genre")); params.append(genre.lower())
     if content_type != "All": conditions.append("content_type = ?"); params.append(content_type)
     if search:
         conditions.append("lower(concat_ws(' ', title, keywords, description)) LIKE ?")
@@ -1709,14 +1752,14 @@ with tabs[4]:
         FROM catalog WHERE {' AND '.join(conditions)} ORDER BY date_added DESC, title LIMIT 1000
     """, params)
     st.caption(f"Showing {len(explorer):,} records (maximum 1,000).")
-    st.dataframe(format_result(explorer), use_container_width=True, hide_index=True)
+    st.dataframe(format_result(explorer), width="stretch", hide_index=True)
     render_download_options(explorer, "streamvault_filtered_catalog", "StreamVault filtered catalog", "filtered_catalog")
 
 
 # ---------- Batch Debugger ----------
 with tabs[5]:
     st.subheader("Automated Question Debugger")
-    st.write("Run Questions 8–36 together and inspect how StreamVault interprets each question.")
+    st.write("Run Questions 8â€“36 together and inspect how StreamVault interprets each question.")
     st.warning("An OK result only means the question executed without crashing. Compare the interpretation, SQL, and output with the expected behavior to confirm accuracy.")
 
     debug_categories = sorted({test["category"] for test in DEBUG_QUESTIONS})
@@ -1781,8 +1824,8 @@ with tabs[5]:
         render_download_options(summary_df, "streamvault_debug_summary", "StreamVault debug summary", "debug_summary")
         st.markdown("### Detailed Results")
         for detail in st.session_state.debug_details:
-            icon = "✅" if detail["status"] == "OK" else "❌"
-            with st.expander(f"{icon} Question {detail['id']} — {detail['category']}"):
+            icon = "âœ…" if detail["status"] == "OK" else "âŒ"
+            with st.expander(f"{icon} Question {detail['id']} â€” {detail['category']}"):
                 st.markdown("**Question**")
                 st.write(detail["question"])
                 st.markdown("**Expected behavior**")
@@ -1874,3 +1917,4 @@ with tabs[5]:
             first.metric("Entire benchmark", f"{st.session_state.performance_batch_seconds:.3f}s", "Goal < 30s")
             second.metric("Peak traced memory", f"{st.session_state.performance_peak_memory:.2f} MB")
             st.dataframe(st.session_state.performance_results, width="stretch", hide_index=True)
+

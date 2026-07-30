@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+streamvault_dashboard_backup_*.py
+.DS_Store

@@ -1,0 +1,13 @@
+column,rows,raw_empty_strings,raw_blank_token_values,cleaned_missing_values,cleaned_nonmissing_values
+show_id,8807,0,0,0,8807
+type,8807,0,0,0,8807
+title,8807,0,1,1,8806
+director,8807,2634,2634,2634,6173
+cast,8807,825,825,825,7982
+country,8807,831,831,831,7976
+date_added,8807,10,10,10,8797
+release_year,8807,0,0,0,8807
+rating,8807,4,4,4,8803
+duration,8807,3,3,3,8804
+listed_in,8807,0,0,0,8807
+description,8807,0,0,0,8807

@@ -12,11 +12,13 @@ class QuestionEngineTests(unittest.TestCase):
 
     def test_country_filter_is_applied_to_default_youcatalog(self):
         _, result, plan = self.app["ask_streamvault"](
-            "How many titles are from the United States?",
+            "How many Comedies titles are from the United States?",
             self.report_date,
         )
-        self.assertIn("lower(country) IN (?)", plan["sql"])
-        self.assertTrue((result["Country"] == "United States").all())
+        self.assertIn("regexp_matches(lower(country)", plan["sql"])
+        self.assertIn("regexp_matches(lower(genre)", plan["sql"])
+        self.assertTrue(result["Country"].str.contains("United States").all())
+        self.assertTrue(result["Genre"].str.contains("Comedies").all())
 
     def test_country_runtime_comparison_uses_populated_default_fields(self):
         _, result, _ = self.app["ask_streamvault"](
@@ -38,11 +40,20 @@ class QuestionEngineTests(unittest.TestCase):
             [self.report_date],
         ).iloc[0, 0]
         answer, result, plan = self.app["ask_streamvault"](
-            f"What's the completion rate for {title}?",
+            f"What's the runtime for {title}?",
             self.report_date,
         )
         self.assertEqual(plan["interpretation"], "Exact catalog title match")
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["Title"], title)
-        self.assertIn("Completion Rate", result.columns)
+        self.assertIn("Runtime (min)", result.columns)
         self.assertNotIn("semantic search", answer.lower())
+
+    def test_empty_analytics_field_returns_actionable_guidance(self):
+        answer, result, plan = self.app["ask_streamvault"](
+            "What's the completion rate for Stranger Things?",
+            self.report_date,
+        )
+        self.assertTrue(result.empty)
+        self.assertIn("does not include populated Completion Rate data", answer)
+        self.assertIn("unavailable", plan["interpretation"].lower())

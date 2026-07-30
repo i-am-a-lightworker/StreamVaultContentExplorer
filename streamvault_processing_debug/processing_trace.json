@@ -1,0 +1,319 @@
+{
+  "dataset": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\netflix_titles.csv",
+  "project_root": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard",
+  "row_count": 8807,
+  "column_count": 12,
+  "columns": [
+    "show_id",
+    "type",
+    "title",
+    "director",
+    "cast",
+    "country",
+    "date_added",
+    "release_year",
+    "rating",
+    "duration",
+    "listed_in",
+    "description"
+  ],
+  "country_trace": {
+    "country_column_found": true,
+    "total_catalog_rows": 8807,
+    "raw_blank_country_cells": 831,
+    "raw_nonblank_country_cells": 7976,
+    "raw_unique_country_strings_including_combinations": 748,
+    "cleaned_blank_country_cells": 831,
+    "cleaned_unique_country_strings_including_combinations": 748,
+    "exploded_country_occurrences": 10012,
+    "normalized_unique_individual_countries": 122,
+    "top_25_individual_countries": {
+      "United States": 3690,
+      "India": 1046,
+      "United Kingdom": 806,
+      "Canada": 445,
+      "France": 393,
+      "Japan": 318,
+      "Spain": 232,
+      "South Korea": 231,
+      "Germany": 226,
+      "Mexico": 169,
+      "China": 162,
+      "Australia": 160,
+      "Egypt": 117,
+      "Turkey": 113,
+      "Hong Kong": 105,
+      "Nigeria": 103,
+      "Italy": 100,
+      "Brazil": 97,
+      "Argentina": 91,
+      "Belgium": 90,
+      "Indonesia": 90,
+      "Taiwan": 89,
+      "Philippines": 83,
+      "Thailand": 70,
+      "South Africa": 62
+    },
+    "suspicious_country_tokens": [],
+    "correct_dashboard_formula": "split country strings first, explode them, strip whitespace, case-normalize, then call nunique()",
+    "incorrect_dashboard_formula": "df['country'].dropna().nunique() counts combinations such as 'United States, Canada' as separate country values"
+  },
+  "blank_trace": [
+    {
+      "column": "show_id",
+      "rows": 8807,
+      "raw_empty_strings": 0,
+      "raw_blank_token_values": 0,
+      "cleaned_missing_values": 0,
+      "cleaned_nonmissing_values": 8807
+    },
+    {
+      "column": "type",
+      "rows": 8807,
+      "raw_empty_strings": 0,
+      "raw_blank_token_values": 0,
+      "cleaned_missing_values": 0,
+      "cleaned_nonmissing_values": 8807
+    },
+    {
+      "column": "title",
+      "rows": 8807,
+      "raw_empty_strings": 0,
+      "raw_blank_token_values": 1,
+      "cleaned_missing_values": 1,
+      "cleaned_nonmissing_values": 8806
+    },
+    {
+      "column": "director",
+      "rows": 8807,
+      "raw_empty_strings": 2634,
+      "raw_blank_token_values": 2634,
+      "cleaned_missing_values": 2634,
+      "cleaned_nonmissing_values": 6173
+    },
+    {
+      "column": "cast",
+      "rows": 8807,
+      "raw_empty_strings": 825,
+      "raw_blank_token_values": 825,
+      "cleaned_missing_values": 825,
+      "cleaned_nonmissing_values": 7982
+    },
+    {
+      "column": "country",
+      "rows": 8807,
+      "raw_empty_strings": 831,
+      "raw_blank_token_values": 831,
+      "cleaned_missing_values": 831,
+      "cleaned_nonmissing_values": 7976
+    },
+    {
+      "column": "date_added",
+      "rows": 8807,
+      "raw_empty_strings": 10,
+      "raw_blank_token_values": 10,
+      "cleaned_missing_values": 10,
+      "cleaned_nonmissing_values": 8797
+    },
+    {
+      "column": "release_year",
+      "rows": 8807,
+      "raw_empty_strings": 0,
+      "raw_blank_token_values": 0,
+      "cleaned_missing_values": 0,
+      "cleaned_nonmissing_values": 8807
+    },
+    {
+      "column": "rating",
+      "rows": 8807,
+      "raw_empty_strings": 4,
+      "raw_blank_token_values": 4,
+      "cleaned_missing_values": 4,
+      "cleaned_nonmissing_values": 8803
+    },
+    {
+      "column": "duration",
+      "rows": 8807,
+      "raw_empty_strings": 3,
+      "raw_blank_token_values": 3,
+      "cleaned_missing_values": 3,
+      "cleaned_nonmissing_values": 8804
+    },
+    {
+      "column": "listed_in",
+      "rows": 8807,
+      "raw_empty_strings": 0,
+      "raw_blank_token_values": 0,
+      "cleaned_missing_values": 0,
+      "cleaned_nonmissing_values": 8807
+    },
+    {
+      "column": "description",
+      "rows": 8807,
+      "raw_empty_strings": 0,
+      "raw_blank_token_values": 0,
+      "cleaned_missing_values": 0,
+      "cleaned_nonmissing_values": 8807
+    }
+  ],
+  "python_code_findings": [
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\app.py",
+      "line": 1680,
+      "type": "streamlit_metric_country",
+      "severity": "INFO",
+      "code": "c7.metric(\"Countries\", f\"{scalar('SELECT COUNT(DISTINCT country) FROM catalog WHERE date_added <= ?', [as_of]):,}\")"
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\dashboard.py",
+      "line": 9,
+      "type": "country_value_counts",
+      "severity": "INFO",
+      "code": "\"top_countries\": df[\"country\"].value_counts().head(5).to_dict(),"
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_batch_debugger.py",
+      "line": 8,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "- Diagnose inflated country counts caused by incorrect splitting or row counting"
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_batch_debugger.py",
+      "line": 194,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "\"If the app reported 748 countries, it likely counted rows or exploded \""
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_dashboard.py",
+      "line": 199,
+      "type": "streamlit_metric_country",
+      "severity": "INFO",
+      "code": "metrics[3].metric(\"Missing countries\", f\"{int(df['country'].isna().sum()):,}\" if \"country\" in df.columns else \"—\")"
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_dashboard.py",
+      "line": 252,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "countries = split_multi_value(df[\"country\"])"
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_dashboard.py",
+      "line": 257,
+      "type": "raw_country_nunique",
+      "severity": "WARNING",
+      "code": "raw_combinations = int(df[\"country\"].dropna().nunique())"
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_processing_debugger.py",
+      "line": 125,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "countries = split_countries(cleaned_series)"
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_processing_debugger.py",
+      "line": 163,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "\"split country strings first, explode them, strip whitespace, \""
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_processing_debugger.py",
+      "line": 167,
+      "type": "raw_country_nunique",
+      "severity": "WARNING",
+      "code": "\"df['country'].dropna().nunique() counts combinations such as \""
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_processing_debugger.py",
+      "line": 210,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "\"country_split\": re.compile("
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_processing_debugger.py",
+      "line": 211,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "r\"\"\"(?:country|countries).*?(?:split|explode)\"\"\","
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_processing_debugger.py",
+      "line": 330,
+      "type": "country_split",
+      "severity": "INFO",
+      "code": "f\"{country['exploded_country_occurrences']:,}\""
+    }
+  ],
+  "candidate_streamlit_apps": [
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_dashboard.py",
+      "score": 7,
+      "signals": [
+        "imports Streamlit",
+        "sets page configuration",
+        "renders a page title",
+        "contains country logic"
+      ],
+      "modified_timestamp": 1785449468.0529194
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_processing_debugger.py",
+      "score": 7,
+      "signals": [
+        "imports Streamlit",
+        "sets page configuration",
+        "renders a page title",
+        "contains country logic"
+      ],
+      "modified_timestamp": 1785449942.6524084
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\app.py",
+      "score": 6,
+      "signals": [
+        "imports Streamlit",
+        "sets page configuration",
+        "contains country logic"
+      ],
+      "modified_timestamp": 1785268889.7267923
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\dashboard.py",
+      "score": 4,
+      "signals": [
+        "imports Streamlit",
+        "contains country logic"
+      ],
+      "modified_timestamp": 1785426656.2347982
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\streamvault_batch_debugger.py",
+      "score": 1,
+      "signals": [
+        "contains country logic"
+      ],
+      "modified_timestamp": 1785447210.8708174
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\tests\\test_data_quality.py",
+      "score": 1,
+      "signals": [
+        "contains country logic"
+      ],
+      "modified_timestamp": 1785268815.2467327
+    },
+    {
+      "file": "C:\\Users\\sha\\Desktop\\Github-Projects\\streamvault_dashboard\\streamvault_dashboard\\tests\\test_question_engine.py",
+      "score": 1,
+      "signals": [
+        "contains country logic"
+      ],
+      "modified_timestamp": 1785268817.1903484
+    }
+  ]
+}

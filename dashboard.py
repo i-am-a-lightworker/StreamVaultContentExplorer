@@ -30,3 +30,16 @@ print(catalog_overview(df))
 print(content_trends(df))
 print(runtime_insights(df))
 print(rating_distribution(df))
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.DataFrame({
+    'Category': ['A', 'B', 'C', 'D'],
+    'Value': [12, 25, 7, 30]
+})
+
+fig, ax = plt.subplots()
+df.plot(kind='bar', x='Category', y='Value', ax=ax)
+
+st.pyplot(fig)

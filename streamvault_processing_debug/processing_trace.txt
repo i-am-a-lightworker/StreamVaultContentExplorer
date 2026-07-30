@@ -1,0 +1,57 @@
+STREAMVAULT PROCESSING TRACE
+===============================
+Dataset: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\netflix_titles.csv
+
+COUNTRY PIPELINE
+--------------------
+Catalog rows: 8,807
+Raw blank country cells: 831
+Raw nonblank country cells: 7,976
+Raw unique country strings/combinations: 748
+Cleaned unique country strings/combinations: 748
+Exploded country occurrences: 10,012
+CORRECT unique individual countries: 122
+
+Diagnosis:
+df['country'].dropna().nunique() counts combinations such as 'United States, Canada' as separate country values
+
+POSSIBLE STREAMLIT APP FILES
+-----------------------------
+[score 7] C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_dashboard.py (imports Streamlit, sets page configuration, renders a page title, contains country logic)
+[score 7] C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_processing_debugger.py (imports Streamlit, sets page configuration, renders a page title, contains country logic)
+[score 6] C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\app.py (imports Streamlit, sets page configuration, contains country logic)
+[score 4] C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\dashboard.py (imports Streamlit, contains country logic)
+[score 1] C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_batch_debugger.py (contains country logic)
+[score 1] C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\tests\test_data_quality.py (contains country logic)
+[score 1] C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\tests\test_question_engine.py (contains country logic)
+
+COUNTRY CODE SCAN
+-----------------
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\app.py:1680 [streamlit_metric_country] c7.metric("Countries", f"{scalar('SELECT COUNT(DISTINCT country) FROM catalog WHERE date_added <= ?', [as_of]):,}")
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\dashboard.py:9 [country_value_counts] "top_countries": df["country"].value_counts().head(5).to_dict(),
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_batch_debugger.py:8 [country_split] - Diagnose inflated country counts caused by incorrect splitting or row counting
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_batch_debugger.py:194 [country_split] "If the app reported 748 countries, it likely counted rows or exploded "
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_dashboard.py:199 [streamlit_metric_country] metrics[3].metric("Missing countries", f"{int(df['country'].isna().sum()):,}" if "country" in df.columns else "—")
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_dashboard.py:252 [country_split] countries = split_multi_value(df["country"])
+WARNING: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_dashboard.py:257 [raw_country_nunique] raw_combinations = int(df["country"].dropna().nunique())
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_processing_debugger.py:125 [country_split] countries = split_countries(cleaned_series)
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_processing_debugger.py:163 [country_split] "split country strings first, explode them, strip whitespace, "
+WARNING: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_processing_debugger.py:167 [raw_country_nunique] "df['country'].dropna().nunique() counts combinations such as "
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_processing_debugger.py:210 [country_split] "country_split": re.compile(
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_processing_debugger.py:211 [country_split] r"""(?:country|countries).*?(?:split|explode)""",
+INFO: C:\Users\sha\Desktop\Github-Projects\streamvault_dashboard\streamvault_dashboard\streamvault_processing_debugger.py:330 [country_split] f"{country['exploded_country_occurrences']:,}"
+
+BLANK FIELD AUDIT
+-----------------
+director: 2,634 empty; 6,173 populated
+country: 831 empty; 7,976 populated
+cast: 825 empty; 7,982 populated
+date_added: 10 empty; 8,797 populated
+rating: 4 empty; 8,803 populated
+duration: 3 empty; 8,804 populated
+title: 1 empty; 8,806 populated
+show_id: 0 empty; 8,807 populated
+type: 0 empty; 8,807 populated
+release_year: 0 empty; 8,807 populated
+listed_in: 0 empty; 8,807 populated
+description: 0 empty; 8,807 populated
